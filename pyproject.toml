@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 c2-overlay = "c2_overlay:main"
+c2-overlay-lint = "c2_overlay.ass_lint:main"
 
 [tool.uv]
 package = true

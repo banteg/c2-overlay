@@ -34,6 +34,18 @@ Basic usage (generates ASS subtitle file):
 uvx c2-overlay video.mp4 workout.fit
 ```
 
+Generate and lint the ASS output:
+
+```bash
+uvx c2-overlay video.mp4 workout.fit --lint
+```
+
+Lint an existing ASS file:
+
+```bash
+uvx c2-overlay-lint video.ass
+```
+
 Burn overlay into video:
 
 ```bash
@@ -58,6 +70,9 @@ uvx c2-overlay video.mp4 workout.fit --offset 2.5
 - `--top-margin PX`: Top margin (positions overlay from top)
 - `--bottom-margin PX`: Bottom margin (default positioning)
 - `--box-alpha 0-255`: Background transparency (0=opaque, 255=transparent, default: 112)
+- `--no-interp`: Disable per-second/per-meter interpolation (smaller ASS output)
+- `--lint`: Lint the generated ASS output and exit non-zero on errors
+- `--lint-strict`: Like `--lint`, but also fails on warnings
 - `--crf VALUE`: Video quality for burn-in (default: 18)
 - `--preset PRESET`: Encoding preset (default: veryfast)
 

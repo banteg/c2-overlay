@@ -1385,6 +1385,16 @@ def main() -> int:
         action="store_true",
         help="Disable per-second work time and per-meter distance interpolation (smaller ASS output).",
     )
+    ap.add_argument(
+        "--lint",
+        action="store_true",
+        help="Lint the generated .ass output and exit non-zero on errors.",
+    )
+    ap.add_argument(
+        "--lint-strict",
+        action="store_true",
+        help="Like --lint, but also fails on warnings.",
+    )
 
     ap.add_argument(
         "--burn-in",
@@ -1519,15 +1529,30 @@ def main() -> int:
             value_fs=args.fontsize,
             left_margin=args.left_margin,
             top_margin=args.top_margin,
-        bottom_margin=args.bottom_margin,
-        box_alpha=args.box_alpha,
-        interpolate=(not args.no_interp),
-        laps=parsed.laps,
-    )
+            bottom_margin=args.bottom_margin,
+            box_alpha=args.box_alpha,
+            interpolate=(not args.no_interp),
+            laps=parsed.laps,
+        )
     except Exception as e:
         print(f"ERROR: Could not generate ASS overlay:\n{e}", file=sys.stderr)
         return 2
     print(f"Wrote ASS overlay: {out_ass}")
+
+    # Lint (optional)
+    if args.lint or args.lint_strict:
+        from c2_overlay.ass_lint import SEVERITY_RANK, lint_ass_file, print_issues
+
+        issues = lint_ass_file(out_ass)
+        if issues:
+            print(f"== ASS Lint ({len(issues)} issue(s)) ==", file=sys.stderr)
+            print_issues(issues)
+
+        fail_on = "warn" if args.lint_strict else "error"
+        fail_rank = SEVERITY_RANK[fail_on]
+        if any(SEVERITY_RANK.get(i.severity, 0) >= fail_rank for i in issues):
+            print(f"ERROR: ASS lint failed (fail-on {fail_on}).", file=sys.stderr)
+            return 1
 
     # Burn-in (optional)
     if args.burn_in:
