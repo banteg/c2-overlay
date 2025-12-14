@@ -22,7 +22,6 @@ Example
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import os
@@ -30,7 +29,6 @@ import re
 import shutil
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -157,90 +155,6 @@ class LapSegment:
     avg_hr_bpm: Optional[int]
 
 
-def parse_tcx(tcx_path: str) -> List[Sample]:
-    """
-    Parse a Concept2/TrainingCenterDatabase TCX file.
-
-    We read all <Trackpoint> entries and extract:
-      - Time (absolute)
-      - DistanceMeters
-      - HeartRateBpm/Value
-      - Cadence (often SPM)
-      - Extensions: Watts, Speed, StrokeRate (if present)
-    """
-    # Some Concept2 exports (or toolchains) prepend a UTF-8 BOM and/or whitespace
-    # before the XML declaration, which trips up `ET.parse(...)`.
-    raw = Path(tcx_path).read_bytes()
-    text = raw.decode("utf-8-sig", errors="replace").lstrip()
-    root = ET.fromstring(text)
-
-    samples: List[Sample] = []
-
-    for tp in root.findall(".//{*}Trackpoint"):
-        time_text = (tp.findtext("./{*}Time") or "").strip()
-        if not time_text:
-            continue
-        try:
-            t = parse_iso8601(time_text)
-        except Exception:
-            continue
-
-        dist_text = (tp.findtext("./{*}DistanceMeters") or "").strip()
-        distance_m = float(dist_text) if dist_text else None
-
-        hr_text = (tp.findtext("./{*}HeartRateBpm/{*}Value") or "").strip()
-        hr = int(hr_text) if hr_text.isdigit() else None
-
-        cad_text = (tp.findtext("./{*}Cadence") or "").strip()
-        cadence = int(cad_text) if cad_text.isdigit() else None
-
-        watts: Optional[int] = None
-        speed: Optional[float] = None
-        stroke_rate: Optional[int] = None
-
-        # Scan descendants for extensions (namespace-agnostic)
-        for el in tp.iter():
-            local = el.tag.split("}")[-1].lower()
-            txt = (el.text or "").strip()
-            if not txt:
-                continue
-
-            if local in ("watts", "power"):
-                try:
-                    watts = int(float(txt))
-                except ValueError:
-                    pass
-            elif local == "speed":
-                try:
-                    speed = float(txt)
-                except ValueError:
-                    pass
-            elif local in ("strokerate", "strokecadence"):
-                try:
-                    stroke_rate = int(float(txt))
-                except ValueError:
-                    pass
-
-        if cadence is None and stroke_rate is not None:
-            cadence = stroke_rate
-
-        samples.append(Sample(t=t, distance_m=distance_m, hr=hr, cadence=cadence, watts=watts, speed=speed))
-
-    samples.sort(key=lambda s: s.t)
-
-    # Fill in missing speeds from distance/time deltas (m/s)
-    for i in range(1, len(samples)):
-        if samples[i].speed is None and samples[i].distance_m is not None and samples[i - 1].distance_m is not None:
-            dt = (samples[i].t - samples[i - 1].t).total_seconds()
-            dd = samples[i].distance_m - samples[i - 1].distance_m
-            if dt > 0 and dd >= 0:
-                samples[i].speed = dd / dt
-    if samples and samples[0].speed is None and len(samples) > 1:
-        samples[0].speed = samples[1].speed
-
-    return samples
-
-
 def parse_fit(fit_path: str) -> List[Sample]:
     if FitFile is None:
         raise RuntimeError("fitparse is not installed; add it to dependencies or install it to parse .fit files.")
@@ -290,92 +204,14 @@ def parse_fit(fit_path: str) -> List[Sample]:
     return samples
 
 
-def parse_concept2_csv(csv_path: str) -> List[Sample]:
-    """
-    Parse Concept2 "result" CSV (stroke/summary-like samples).
-
-    These files contain relative times that can reset across pieces/intervals.
-    We stitch segments into a monotonic elapsed timeline and anchor it at a
-    dummy epoch (UTC) so downstream rendering works.
-    """
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    samples: List[Sample] = []
-
-    time_base = 0.0
-    dist_base = 0.0
-    prev_time = None
-    prev_dist = None
-
-    with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
-        r = csv.DictReader(f)
-        for row in r:
-            t_s = (row.get("Time (seconds)") or "").strip()
-            d_m = (row.get("Distance (meters)") or "").strip()
-            if not t_s or not d_m:
-                continue
-            try:
-                t_rel = float(t_s)
-                d_rel = float(d_m)
-            except ValueError:
-                continue
-
-            if prev_time is not None and prev_dist is not None:
-                if t_rel + 1e-6 < prev_time or d_rel + 1e-3 < prev_dist:
-                    time_base += prev_time
-                    dist_base += prev_dist
-                    prev_time = None
-                    prev_dist = None
-
-            t_total = time_base + t_rel
-            d_total = dist_base + d_rel
-
-            watts = (row.get("Watts") or "").strip()
-            watts_i = int(watts) if watts.isdigit() else None
-
-            cadence = (row.get("Stroke Rate") or "").strip()
-            cadence_i = int(cadence) if cadence.isdigit() else None
-
-            hr = (row.get("Heart Rate") or "").strip()
-            hr_i = int(hr) if hr.isdigit() else None
-
-            pace = (row.get("Pace (seconds)") or "").strip()
-            speed = None
-            try:
-                pace_s = float(pace)
-                if pace_s > 0:
-                    speed = 500.0 / pace_s
-            except ValueError:
-                pass
-
-            samples.append(
-                Sample(
-                    t=epoch + timedelta(seconds=t_total),
-                    distance_m=d_total,
-                    hr=hr_i,
-                    cadence=cadence_i,
-                    watts=watts_i,
-                    speed=speed,
-                )
-            )
-            prev_time = t_rel
-            prev_dist = d_rel
-
-    samples.sort(key=lambda s: s.t)
-    return samples
-
-
 @dataclass(frozen=True)
 class ParsedData:
     samples: List[Sample]
-    timebase: str  # "absolute" | "relative"
-    kind: str  # "tcx" | "fit" | "csv"
     laps: Optional[List[LapSegment]] = None
 
 
 def parse_data_file(path: str) -> ParsedData:
     ext = Path(path).suffix.lower()
-    if ext == ".tcx":
-        return ParsedData(samples=parse_tcx(path), timebase="absolute", kind="tcx")
     if ext == ".fit":
         samples = parse_fit(path)
         laps: List[LapSegment] = []
@@ -435,10 +271,8 @@ def parse_data_file(path: str) -> ParsedData:
                 )
 
         laps.sort(key=lambda l: l.start)
-        return ParsedData(samples=samples, timebase="absolute", kind="fit", laps=laps or None)
-    if ext == ".csv":
-        return ParsedData(samples=parse_concept2_csv(path), timebase="relative", kind="csv")
-    raise ValueError(f"Unsupported data file extension: {ext} (expected .tcx, .fit, or .csv)")
+        return ParsedData(samples=samples, laps=laps or None)
+    raise ValueError(f"Unsupported data file extension: {ext} (expected .fit)")
 
 
 # -----------------------------
@@ -1046,10 +880,10 @@ def choose_tcx_anchor_index(samples: List[Sample], *, video_start: datetime, mod
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="rowerg_overlay.py",
-        description="Create a PM5-style overlay (.ass subtitles) from Concept2 workout data and align it to a video using metadata timestamps.",
+        description="Create a PM5-style overlay (.ass subtitles) from a Concept2 FIT file and align it to a video using metadata timestamps.",
     )
     ap.add_argument("video", help="Input video file (mp4/mov/etc)")
-    ap.add_argument("tcx", help="Workout data file (.tcx, .fit, or Concept2 .csv)")
+    ap.add_argument("fit", help="Concept2 workout data file (.fit)")
     ap.add_argument("-o", "--out-ass", default=None, help="Output .ass path (default: next to input video)")
 
     ap.add_argument("--offset", type=float, default=0.0,
@@ -1097,10 +931,10 @@ def main() -> int:
         return 2
 
     video_path = args.video
-    data_path = args.tcx
+    data_path = args.fit
     out_ass = args.out_ass or str(Path(video_path).with_suffix(".ass"))
 
-    # Parse data (tcx/fit/csv)
+    # Parse data (.fit)
     try:
         parsed = parse_data_file(data_path)
     except Exception as e:
@@ -1117,19 +951,12 @@ def main() -> int:
     w, h, duration, video_creation, source = get_video_metadata(video_path, ffprobe_bin=args.ffprobe_bin)
 
     # Choose anchor (t0) used for both alignment and displayed elapsed time.
-    video_start_for_anchor = video_creation
-    if parsed.timebase == "relative":
-        video_start_for_anchor = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-    anchor_idx = choose_tcx_anchor_index(samples_all, video_start=video_start_for_anchor, mode=args.tcx_anchor)
+    anchor_idx = choose_tcx_anchor_index(samples_all, video_start=video_creation, mode=args.tcx_anchor)
     samples = samples_all[anchor_idx:] if anchor_idx else samples_all
     tcx_anchor = samples[0].t
 
     # Auto offset: when does anchor occur on the video timeline?
-    if parsed.timebase == "absolute":
-        auto_offset = (tcx_anchor - video_creation).total_seconds()
-    else:
-        auto_offset = 0.0
+    auto_offset = (tcx_anchor - video_creation).total_seconds()
     offset = auto_offset + float(args.offset)
 
     print("== Alignment ==")
@@ -1137,19 +964,16 @@ def main() -> int:
     if duration is not None:
         video_end = datetime.fromtimestamp(video_creation.timestamp() + duration, tz=timezone.utc)
         print(f"Video end time (UTC):            {video_end.isoformat()}  [duration {duration:.2f} s]")
-    print(f"Data file: {data_path}  [{parsed.kind}, {parsed.timebase}]")
-    if parsed.timebase == "absolute":
-        print(f"Data first timestamp (UTC):      {data_start.isoformat()}")
-        delta0 = (data_start - video_creation).total_seconds()
-        if abs(delta0) >= 1.0:
-            when = "after" if delta0 > 0 else "before"
-            print(f"Data starts {abs(delta0):.1f} s {when} video start (based on absolute timestamps).")
-        first_row_visible = next((s for s in samples_all if s.t >= video_creation and (s.cadence or 0) > 0), None)
-        if first_row_visible is not None:
-            tv = (first_row_visible.t - video_creation).total_seconds()
-            print(f"First sample with cadence>0 during video: t={tv:.1f} s  [{first_row_visible.t.isoformat()}]")
-    else:
-        print("Data has relative timestamps; auto alignment is disabled (auto_offset=0). Use --offset to place it.")
+    print(f"FIT file: {data_path}")
+    print(f"FIT first timestamp (UTC):       {data_start.isoformat()}")
+    delta0 = (data_start - video_creation).total_seconds()
+    if abs(delta0) >= 1.0:
+        when = "after" if delta0 > 0 else "before"
+        print(f"FIT starts {abs(delta0):.1f} s {when} video start (based on absolute timestamps).")
+    first_row_visible = next((s for s in samples_all if s.t >= video_creation and (s.cadence or 0) > 0), None)
+    if first_row_visible is not None:
+        tv = (first_row_visible.t - video_creation).total_seconds()
+        print(f"First sample with cadence>0 during video: t={tv:.1f} s  [{first_row_visible.t.isoformat()}]")
     if tcx_anchor != data_start:
         print(f"Data anchor ({args.tcx_anchor}) time (UTC): {tcx_anchor.isoformat()}  [idx {anchor_idx}]")
     print(f"Auto offset (anchor - video_start): {auto_offset:+.3f} s")
