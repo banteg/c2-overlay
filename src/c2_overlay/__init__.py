@@ -35,10 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-try:
-    from fitparse import FitFile
-except Exception:  # pragma: no cover
-    FitFile = None  # type: ignore[misc,assignment]
+from fitparse import FitFile
 
 
 # -----------------------------
@@ -135,9 +132,6 @@ class LapSegment:
 
 
 def parse_fit(fit_path: str) -> List[Sample]:
-    if FitFile is None:
-        raise RuntimeError("fitparse is not installed; add it to dependencies or install it to parse .fit files.")
-
     fit = FitFile(fit_path)
     samples: List[Sample] = []
     for msg in fit.get_messages("record"):
@@ -194,53 +188,52 @@ def parse_data_file(path: str) -> ParsedData:
     if ext == ".fit":
         samples = parse_fit(path)
         laps: List[LapSegment] = []
-        if FitFile is not None:
-            fit = FitFile(path)
-            # Build a timestamp list for fast lookup of lap start distances.
-            ts_list = [s.t for s in samples]
-            dist_list = [s.distance_m for s in samples]
+        fit = FitFile(path)
+        # Build a timestamp list for fast lookup of lap start distances.
+        ts_list = [s.t for s in samples]
+        dist_list = [s.distance_m for s in samples]
 
-            def distance_at(t: datetime) -> Optional[float]:
-                idx = min(bisect_left(ts_list, t), len(ts_list) - 1)
-                # Prefer the first sample at/after start; fallback to previous if missing distance.
-                for j in (idx, idx - 1, idx + 1):
-                    if 0 <= j < len(dist_list) and dist_list[j] is not None:
-                        return float(dist_list[j])
-                return None
+        def distance_at(t: datetime) -> Optional[float]:
+            idx = min(bisect_left(ts_list, t), len(ts_list) - 1)
+            # Prefer the first sample at/after start; fallback to previous if missing distance.
+            for j in (idx, idx - 1, idx + 1):
+                if 0 <= j < len(dist_list) and dist_list[j] is not None:
+                    return float(dist_list[j])
+            return None
 
-            for msg in fit.get_messages("lap"):
-                fields = {f.name: f.value for f in msg}
-                start = fields.get("start_time")
-                end = fields.get("timestamp")
-                if not isinstance(start, datetime) or not isinstance(end, datetime):
-                    continue
-                if start.tzinfo is None:
-                    start = start.replace(tzinfo=timezone.utc)
-                if end.tzinfo is None:
-                    end = end.replace(tzinfo=timezone.utc)
+        for msg in fit.get_messages("lap"):
+            fields = {f.name: f.value for f in msg}
+            start = fields.get("start_time")
+            end = fields.get("timestamp")
+            if not isinstance(start, datetime) or not isinstance(end, datetime):
+                continue
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=timezone.utc)
 
-                total_elapsed = fields.get("total_elapsed_time")
-                total_distance = fields.get("total_distance")
-                avg_speed = fields.get("enhanced_avg_speed", fields.get("avg_speed"))
-                avg_power = fields.get("avg_power")
-                avg_cadence = fields.get("avg_cadence")
-                avg_hr = fields.get("avg_heart_rate")
+            total_elapsed = fields.get("total_elapsed_time")
+            total_distance = fields.get("total_distance")
+            avg_speed = fields.get("enhanced_avg_speed", fields.get("avg_speed"))
+            avg_power = fields.get("avg_power")
+            avg_cadence = fields.get("avg_cadence")
+            avg_hr = fields.get("avg_heart_rate")
 
-                laps.append(
-                    LapSegment(
-                        index=int(fields.get("message_index", len(laps))) + 1,
-                        start=start,
-                        end=end,
-                        intensity=str(fields.get("intensity") or "").lower() or "unknown",
-                        start_distance_m=distance_at(start),
-                        total_elapsed_s=float(total_elapsed) if isinstance(total_elapsed, (int, float)) else None,
-                        total_distance_m=float(total_distance) if isinstance(total_distance, (int, float)) else None,
-                        avg_speed_m_s=float(avg_speed) if isinstance(avg_speed, (int, float)) else None,
-                        avg_power_w=int(avg_power) if isinstance(avg_power, (int, float)) else None,
-                        avg_cadence_spm=int(avg_cadence) if isinstance(avg_cadence, (int, float)) else None,
-                        avg_hr_bpm=int(avg_hr) if isinstance(avg_hr, (int, float)) else None,
-                    )
+            laps.append(
+                LapSegment(
+                    index=int(fields.get("message_index", len(laps))) + 1,
+                    start=start,
+                    end=end,
+                    intensity=str(fields.get("intensity") or "").lower() or "unknown",
+                    start_distance_m=distance_at(start),
+                    total_elapsed_s=float(total_elapsed) if isinstance(total_elapsed, (int, float)) else None,
+                    total_distance_m=float(total_distance) if isinstance(total_distance, (int, float)) else None,
+                    avg_speed_m_s=float(avg_speed) if isinstance(avg_speed, (int, float)) else None,
+                    avg_power_w=int(avg_power) if isinstance(avg_power, (int, float)) else None,
+                    avg_cadence_spm=int(avg_cadence) if isinstance(avg_cadence, (int, float)) else None,
+                    avg_hr_bpm=int(avg_hr) if isinstance(avg_hr, (int, float)) else None,
                 )
+            )
 
         laps.sort(key=lambda l: l.start)
         return ParsedData(samples=samples, laps=laps or None)
