@@ -33,7 +33,7 @@ from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from fitparse import FitFile
 
@@ -65,6 +65,12 @@ def parse_iso8601(s: str) -> datetime:
 
     dt = datetime.fromisoformat(s)
 
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def to_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
@@ -131,16 +137,28 @@ class LapSegment:
     avg_hr_bpm: Optional[int]
 
 
-def parse_fit(fit_path: str) -> List[Sample]:
-    fit = FitFile(fit_path)
+INTENSITY_MAP = {0: "active", 1: "rest"}
+
+
+def normalize_intensity(v: object) -> str:
+    if v is None:
+        return "unknown"
+    if isinstance(v, (int, float)):
+        return INTENSITY_MAP.get(int(v), f"unknown({int(v)})")
+    s = str(v).strip().lower()
+    if s in {"active", "rest"}:
+        return s
+    return s or "unknown"
+
+
+def parse_fit_messages(fit: FitFile) -> List[Sample]:
     samples: List[Sample] = []
     for msg in fit.get_messages("record"):
         fields = {f.name: f.value for f in msg}
         ts = fields.get("timestamp")
-        if ts is None:
+        if not isinstance(ts, datetime):
             continue
-        if isinstance(ts, datetime) and ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+        ts = to_utc(ts)
 
         distance_m = fields.get("distance")
         if isinstance(distance_m, (int, float)):
@@ -177,6 +195,10 @@ def parse_fit(fit_path: str) -> List[Sample]:
     return samples
 
 
+def parse_fit(fit_path: str) -> List[Sample]:
+    return parse_fit_messages(FitFile(fit_path))
+
+
 @dataclass(frozen=True)
 class ParsedData:
     samples: List[Sample]
@@ -186,9 +208,9 @@ class ParsedData:
 def parse_data_file(path: str) -> ParsedData:
     ext = Path(path).suffix.lower()
     if ext == ".fit":
-        samples = parse_fit(path)
-        laps: List[LapSegment] = []
         fit = FitFile(path)
+        samples = parse_fit_messages(fit)
+        laps: List[LapSegment] = []
         # Build a timestamp list for fast lookup of lap start distances.
         ts_list = [s.t for s in samples]
         dist_list = [s.distance_m for s in samples]
@@ -207,10 +229,8 @@ def parse_data_file(path: str) -> ParsedData:
             end = fields.get("timestamp")
             if not isinstance(start, datetime) or not isinstance(end, datetime):
                 continue
-            if start.tzinfo is None:
-                start = start.replace(tzinfo=timezone.utc)
-            if end.tzinfo is None:
-                end = end.replace(tzinfo=timezone.utc)
+            start = to_utc(start)
+            end = to_utc(end)
 
             total_elapsed = fields.get("total_elapsed_time")
             total_distance = fields.get("total_distance")
@@ -224,7 +244,7 @@ def parse_data_file(path: str) -> ParsedData:
                     index=int(fields.get("message_index", len(laps))) + 1,
                     start=start,
                     end=end,
-                    intensity=str(fields.get("intensity") or "").lower() or "unknown",
+                    intensity=normalize_intensity(fields.get("intensity")),
                     start_distance_m=distance_at(start),
                     total_elapsed_s=float(total_elapsed) if isinstance(total_elapsed, (int, float)) else None,
                     total_distance_m=float(total_distance) if isinstance(total_distance, (int, float)) else None,
@@ -244,7 +264,7 @@ def parse_data_file(path: str) -> ParsedData:
 # Video probing
 # -----------------------------
 
-def run_ffprobe(video_path: str, ffprobe_bin: str) -> dict:
+def run_ffprobe(video_path: str, ffprobe_bin: str) -> dict[str, Any]:
     cmd = [
         ffprobe_bin,
         "-v", "error",
@@ -355,6 +375,9 @@ def generate_ass(
     if not samples:
         raise ValueError("No samples found.")
 
+    if laps:
+        laps = sorted(laps, key=lambda l: (l.start, l.index))
+
     if video_w <= 0 or video_h <= 0:
         # If ffprobe couldn't determine, choose a reasonable default
         video_w, video_h = 1280, 720
@@ -408,6 +431,22 @@ def generate_ass(
             first_visible = max(0.0, st)
         last_visible = et if last_visible is None else max(last_visible, et)
 
+    # Include lap-based overlays too (REST intervals can have sparse/no records).
+    if laps:
+        for lap in laps:
+            vt_start = (lap.start - t0).total_seconds() + offset_seconds
+            vt_end = (lap.end - t0).total_seconds() + offset_seconds
+            if vt_end <= 0:
+                continue
+            if video_duration is not None and vt_start >= video_duration:
+                continue
+            st = max(0.0, vt_start)
+            et = min(vt_end, video_duration) if video_duration is not None else vt_end
+            if et <= st:
+                continue
+            first_visible = st if first_visible is None else min(first_visible, st)
+            last_visible = et if last_visible is None else max(last_visible, et)
+
     if first_visible is None:
         first_visible = 0.0
     if last_visible is None:
@@ -417,7 +456,6 @@ def generate_ass(
 
     # Clamp alpha to 0..255
     box_alpha = max(0, min(255, int(box_alpha)))
-    box_a = f"{box_alpha:02X}"  # for \alpha
 
     lines: List[str] = []
     lines.append("[Script Info]")
@@ -544,6 +582,13 @@ def generate_ass(
 
         lap_starts = [l.start for l in laps]
 
+        prev_active_map: dict[int, Optional[LapSegment]] = {}
+        last_active: Optional[LapSegment] = None
+        for lap in laps:
+            prev_active_map[lap.index] = last_active
+            if (lap.intensity or "").lower() == "active":
+                last_active = lap
+
         def lap_for_abs(t: datetime) -> Optional[LapSegment]:
             idx = bisect_left(lap_starts, t)
             for i in (idx - 1, idx):
@@ -618,6 +663,31 @@ def generate_ass(
             alpha = (t - t0_i).total_seconds() / dt
             return float(d0_i + (d1_i - d0_i) * alpha)
 
+        def estimate_distance_at(t: datetime, *, lap: LapSegment, lap_start_dist: float, lap_end_dist: float) -> float:
+            if not ts_abs or not dist_abs:
+                return lap_start_dist
+
+            if t <= ts_abs[0]:
+                d0 = dist_abs[0]
+                if d0 is not None and t >= lap.start:
+                    dt = (ts_abs[0] - lap.start).total_seconds()
+                    if dt > 0:
+                        alpha = (t - lap.start).total_seconds() / dt
+                        return float(lap_start_dist + (float(d0) - lap_start_dist) * alpha)
+                return lap_start_dist
+
+            if t >= ts_abs[-1]:
+                d1 = dist_abs[-1]
+                if d1 is not None and t <= lap.end:
+                    dt = (lap.end - ts_abs[-1]).total_seconds()
+                    if dt > 0:
+                        alpha = (t - ts_abs[-1]).total_seconds() / dt
+                        return float(float(d1) + (lap_end_dist - float(d1)) * alpha)
+                return lap_end_dist
+
+            d = interpolate_distance_at(t)
+            return float(d) if d is not None else lap_start_dist
+
         for lap in laps:
             if (lap.intensity or "").lower() == "rest":
                 continue
@@ -663,20 +733,30 @@ def generate_ass(
             # can make meters tick too early within a stroke.
             interval_bias_start = 0.4  # 0.0 = linear, 1.0 = all-at-end
 
-            # Build a list of (vt, meters) change points.
-            changes: List[Tuple[float, int]] = [(start_v, 0)]
-            prev_t = lap.start
-            prev_d = lap_start_dist
+            lap_end_dist = lap_start_dist + float(lap_total_m)
+            abs_seg_start = max(lap.start, video_time_to_abs(start_v))
+            if abs_seg_start >= lap.end:
+                continue
+            prev_t = abs_seg_start
+            prev_d = estimate_distance_at(prev_t, lap=lap, lap_start_dist=lap_start_dist, lap_end_dist=lap_end_dist)
+            prev_d = min(max(prev_d, lap_start_dist), lap_end_dist)
             eps = 1e-6
+            m_start_v = max(0, int(math.floor((prev_d - lap_start_dist) + eps)))
+            # Keep the final meter tick reserved for the end of the lap.
+            m_start_v = min(m_start_v, max(0, lap_total_m - 1))
+
+            # Build a list of (vt, meters) change points.
+            changes: List[Tuple[float, int]] = [(start_v, m_start_v)]
 
             # Iterate through distance samples in-lap, plus a synthetic endpoint at lap end.
             points: List[Tuple[datetime, float]] = []
-            for i in range(i0, i1):
+            j0 = bisect_left(ts_abs, prev_t)
+            for i in range(j0, i1):
                 d_i = dist_abs[i]
                 if d_i is None:
                     continue
                 points.append((ts_abs[i], float(d_i)))
-            points.append((lap.end, lap_start_dist + float(lap_total_m)))
+            points.append((lap.end, lap_end_dist))
             points.sort(key=lambda x: x[0])
             if not points:
                 continue
@@ -791,11 +871,7 @@ def generate_ass(
                 continue
             start_v, end_v = rng
 
-            prev_active = None
-            for l in reversed(laps):
-                if l.start < lap.start and (l.intensity or "").lower() == "active":
-                    prev_active = l
-                    break
+            prev_active = prev_active_map.get(lap.index)
 
             prev_pace = "--:--.-"
             prev_spm = "--"
@@ -878,7 +954,6 @@ def generate_ass(
 
         lap_intensity = (current_lap.intensity if current_lap else "active").lower()
         is_rest = lap_intensity == "rest"
-        lap_index = current_lap.index if current_lap else 1
 
         if is_rest and laps:
             # Rest laps are rendered per-second above.
@@ -919,11 +994,10 @@ def generate_ass(
             )
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{pace_str}")
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}")
-        if current_lap is None or not laps:
-            # When FIT laps exist, the WORK METERS value is rendered per-meter above.
-            lines.append(
-                f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}"
-            )
+        # Always emit per-sample meters as a fallback; per-meter interpolation (layer 9) overrides it.
+        lines.append(
+            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}"
+        )
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{watts_str}")
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{hr_str}")
 
@@ -954,7 +1028,11 @@ def burn_in(
     ass_dir = os.path.dirname(ass_abs) or "."
     ass_name = os.path.basename(ass_abs)
 
-    vf = f"ass=filename='{ass_name}'"
+    # Escape for ffmpeg filter syntax (not shell escaping).
+    ass_name_escaped = ass_name
+    for ch in ("\\", ":", "'", "[", "]", ",", ";", "="):
+        ass_name_escaped = ass_name_escaped.replace(ch, f"\\{ch}")
+    vf = f"ass=filename='{ass_name_escaped}'"
 
     cmd = [
         ffmpeg_bin,
@@ -997,7 +1075,7 @@ def choose_anchor_index(samples: List[Sample], *, video_start: datetime, mode: s
     if mode == "start":
         return 0
     if mode not in {"first-visible", "first-row-visible"}:
-        raise ValueError(f"unknown tcx anchor mode: {mode}")
+        raise ValueError(f"unknown anchor mode: {mode}")
 
     for i, s in enumerate(samples):
         if s.t < video_start:
