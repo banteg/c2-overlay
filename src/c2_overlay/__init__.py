@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -200,14 +201,7 @@ def parse_data_file(path: str) -> ParsedData:
             dist_list = [s.distance_m for s in samples]
 
             def distance_at(t: datetime) -> Optional[float]:
-                lo, hi = 0, len(ts_list)
-                while lo < hi:
-                    mid = (lo + hi) // 2
-                    if ts_list[mid] < t:
-                        lo = mid + 1
-                    else:
-                        hi = mid
-                idx = min(lo, len(ts_list) - 1)
+                idx = min(bisect_left(ts_list, t), len(ts_list) - 1)
                 # Prefer the first sample at/after start; fallback to previous if missing distance.
                 for j in (idx, idx - 1, idx + 1):
                     if 0 <= j < len(dist_list) and dist_list[j] is not None:
