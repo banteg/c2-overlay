@@ -58,3 +58,21 @@ def test_warn_on_missing_pos() -> None:
     ass = ASS_HEADER + "Dialogue: 9,0:00:00.00,0:00:01.00,Distance,,0,0,0,,100\n"
     issues = lint_ass_text(ass)
     assert any(i.code == "ASS012" and i.severity == "warn" for i in issues)
+
+
+def test_pos_allows_spaces() -> None:
+    ass = (
+        ASS_HEADER
+        + "Dialogue: 9,0:00:00.00,0:00:01.00,Distance,,0,0,0,,{\\pos(10, 10)}100\n"
+    )
+    issues = lint_ass_text(ass)
+    assert not any(i.code == "ASS012" for i in issues)
+
+
+def test_drawing_detection_any_scale() -> None:
+    ass = (
+        ASS_HEADER
+        + "Dialogue: 9,0:00:00.00,0:00:01.00,Distance,,0,0,0,,{\\p4}m 0 0 l 10 0{\\p0}\n"
+    )
+    issues = lint_ass_text(ass)
+    assert not any(i.code == "ASS012" for i in issues)

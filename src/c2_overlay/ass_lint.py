@@ -9,7 +9,9 @@ from pathlib import Path
 
 
 TIME_RE = re.compile(r"^(?P<h>\d+):(?P<m>\d{2}):(?P<s>\d{2})\.(?P<cs>\d{2})$")
-POS_RE = re.compile(r"\\pos\((?P<x>-?\d+(?:\.\d+)?),(?P<y>-?\d+(?:\.\d+)?)\)")
+POS_RE = re.compile(
+    r"\\pos\(\s*(?P<x>-?\d+(?:\.\d+)?)\s*,\s*(?P<y>-?\d+(?:\.\d+)?)\s*\)"
+)
 TAG_RE = re.compile(r"{[^}]*}")
 
 
@@ -142,7 +144,7 @@ def parse_ass_events(text: str) -> tuple[list[AssEvent], list[LintIssue]]:
         text_field = fields.get("Text", "")
         plain = strip_ass_tags(text_field)
         pos = parse_pos(text_field)
-        is_drawing = "\\p1" in text_field or "\\p2" in text_field or "\\p3" in text_field
+        is_drawing = bool(re.search(r"\\p([1-9]\d*)", text_field))
 
         events.append(
             AssEvent(
