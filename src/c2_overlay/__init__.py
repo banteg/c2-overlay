@@ -658,6 +658,7 @@ def generate_ass(
         )
 
     # Per-sample values (6 lines per sample so each value can have its own style/color).
+    upsampled_laps: set[int] = set()
     if laps:
 
         def video_time_to_abs(vt: float) -> datetime:
@@ -915,10 +916,16 @@ def generate_ass(
                 last_m = m
             changes = dedup
 
+            did_emit = False
             for (vt, m), (vt2, _) in zip(changes, changes[1:] + [(end_clip, -1)]):
                 a = max(start_v, vt)
                 b = min(end_clip, vt2)
-                emit_distance_dialogue(a, b, m)
+                if b > a:
+                    emit_distance_dialogue(a, b, m)
+                    did_emit = True
+
+            if did_emit:
+                upsampled_laps.add(lap.index)
 
         # Rest backdrop tint (changes the panel background color during rest intervals).
         rest_backdrop_color = "&H5A4636&"  # slightly brighter, blue-tinted (BGR)
@@ -1124,10 +1131,10 @@ def generate_ass(
         lines.append(
             f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}"
         )
-        # Always emit per-sample meters as a fallback; per-meter interpolation (layer 9) overrides it.
-        lines.append(
-            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}"
-        )
+        if current_lap is None or not laps or current_lap.index not in upsampled_laps:
+            lines.append(
+                f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}"
+            )
         lines.append(
             f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{watts_str}"
         )
