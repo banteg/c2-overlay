@@ -500,6 +500,9 @@ def generate_ass(
     blur_12 = max(0, int(round(12 * blur_scale)))
     blur_1 = max(0, int(round(1 * blur_scale)))
     bord_2 = max(0, int(round(2 * blur_scale)))
+    hdr_bord = max(1, int(round(2 * blur_scale)))
+    hdr_blur = max(0, int(round(1 * blur_scale)))
+    hdr_fx = f"\\bord{hdr_bord}\\3c&H000000&\\3a&H88&\\shad0\\blur{hdr_blur}"
 
     alpha_main = box_alpha  # default ~0x70 to match sample
     alpha_shadow = max(0, min(255, alpha_main + 0x20))  # 0x90 when alpha_main=0x70
@@ -646,7 +649,7 @@ def generate_ass(
 
             state = "REST" if (lap.intensity or "").lower() == "rest" else "WORK"
             header_left_text = (
-                f"{{\\an7\\pos({origin_x + px(12)},{header_y})\\c&HFFFFFF&}}LAP {lap.index:02d} \u00b7 {state}"
+                f"{{\\an7\\pos({origin_x + px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}LAP {lap.index:02d} \u00b7 {state}"
             )
             lines.append(f"Dialogue: 10,{ass_time(st_h)},{ass_time(et_h)},Label,,0,0,0,,{header_left_text}")
 
@@ -712,11 +715,11 @@ def generate_ass(
                     lap_meters = int(round(lap.total_distance_m * frac))
 
                 # Per-second header additions so countdown ticks.
-                header_left_text = f"{{\\an7\\pos({origin_x + px(12)},{header_y})\\c&HFFFFFF&}}{lap_label}"
+                header_left_text = f"{{\\an7\\pos({origin_x + px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}{lap_label}"
                 lines.append(f"Dialogue: 21,{ass_time(t)},{ass_time(tn)},Label,,0,0,0,,{header_left_text}")
                 if rest_remaining is not None:
                     header_right_text = (
-                        f"{{\\an9\\pos({origin_x + box_w - px(12)},{header_y})\\c&HFFFFFF&}}REST {format_elapsed(rest_remaining)}"
+                        f"{{\\an9\\pos({origin_x + box_w - px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}REST {format_elapsed(rest_remaining)}"
                     )
                     lines.append(f"Dialogue: 21,{ass_time(t)},{ass_time(tn)},Label,,0,0,0,,{header_right_text}")
 
