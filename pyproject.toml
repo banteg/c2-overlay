@@ -1,0 +1,12 @@
+[project]
+name = "c2-overlay"
+authors = [
+    {name = "banteg"},
+]
+version = "0.1.0"
+description = "overlay concept2 stroke data over a video"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fitparse>=1.2.0",
+]
