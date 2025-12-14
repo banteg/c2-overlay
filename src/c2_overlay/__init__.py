@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import deque
 from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
@@ -415,6 +416,7 @@ def generate_ass(
     top_margin: int | None,
     bottom_margin: int | None,
     box_alpha: int,
+    interpolate: bool = True,
     laps: list[LapSegment] | None = None,
 ) -> None:
     """
@@ -728,7 +730,7 @@ def generate_ass(
             )
 
         # Per-second TIME during WORK (smooth ticking, like REST).
-        for lap in laps:
+        for lap in (laps if interpolate else []):
             if (lap.intensity or "").lower() == "rest":
                 continue
 
@@ -802,7 +804,7 @@ def generate_ass(
             d = interpolate_distance_at(t)
             return float(d) if d is not None else lap_start_dist
 
-        for lap in laps:
+        for lap in (laps if interpolate else []):
             if (lap.intensity or "").lower() == "rest":
                 continue
 
@@ -1143,7 +1145,7 @@ def generate_ass(
         watts_str = f"{s.watts:d}" if s.watts is not None else "---"
         hr_str = f"{s.hr:d}" if s.hr is not None else "---"
 
-        if current_lap is None or not laps:
+        if current_lap is None or not laps or not interpolate:
             # When FIT laps exist, the WORK TIME value is rendered per-second above.
             lines.append(
                 f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{lap_elapsed_str}"
@@ -1222,11 +1224,31 @@ def burn_in(
     else:
         cmd += ["-c:a", "aac", "-b:a", "192k"]
 
+    if Path(video_out).suffix.lower() in {".mp4", ".m4v"}:
+        cmd += ["-movflags", "+faststart"]
+
     cmd += [video_out]
 
-    p = subprocess.run(cmd, cwd=ass_dir)
-    if p.returncode != 0:
-        raise RuntimeError(f"ffmpeg burn-in failed (code {p.returncode}).")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=ass_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    tail: deque[str] = deque(maxlen=80)
+    for line in proc.stdout:
+        sys.stderr.write(line)
+        tail.append(line)
+    code = proc.wait()
+    if code != 0:
+        last = "".join(tail).strip()
+        msg = f"ffmpeg burn-in failed (code {code})."
+        if last:
+            msg += f"\nLast ffmpeg output:\n{last}"
+        raise RuntimeError(msg)
 
 
 # -----------------------------
@@ -1335,6 +1357,11 @@ def main() -> int:
         type=int,
         default=112,
         help="Background box transparency 0..255 (0=opaque, 255=fully transparent). Default: 112.",
+    )
+    ap.add_argument(
+        "--no-interp",
+        action="store_true",
+        help="Disable per-second work time and per-meter distance interpolation (smaller ASS output).",
     )
 
     ap.add_argument(
@@ -1470,10 +1497,11 @@ def main() -> int:
             value_fs=args.fontsize,
             left_margin=args.left_margin,
             top_margin=args.top_margin,
-            bottom_margin=args.bottom_margin,
-            box_alpha=args.box_alpha,
-            laps=parsed.laps,
-        )
+        bottom_margin=args.bottom_margin,
+        box_alpha=args.box_alpha,
+        interpolate=(not args.no_interp),
+        laps=parsed.laps,
+    )
     except Exception as e:
         print(f"ERROR: Could not generate ASS overlay:\n{e}", file=sys.stderr)
         return 2
