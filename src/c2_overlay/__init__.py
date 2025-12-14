@@ -31,9 +31,9 @@ import subprocess
 import sys
 from bisect import bisect_left
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 from fitparse import FitFile
 
@@ -41,6 +41,7 @@ from fitparse import FitFile
 # -----------------------------
 # Helpers: time parsing/format
 # -----------------------------
+
 
 def parse_iso8601(s: str) -> datetime:
     """
@@ -66,14 +67,14 @@ def parse_iso8601(s: str) -> datetime:
     dt = datetime.fromisoformat(s)
 
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def to_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def format_elapsed(sec: float) -> str:
@@ -88,7 +89,7 @@ def format_elapsed(sec: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m}:{s:02d}"
 
 
-def format_pace(sec_per_500: Optional[float]) -> str:
+def format_pace(sec_per_500: float | None) -> str:
     """Format pace as M:SS.t (tenths), e.g., 2:05.3."""
     if sec_per_500 is None or not math.isfinite(sec_per_500) or sec_per_500 <= 0:
         return "--:--.-"
@@ -115,11 +116,11 @@ def ass_time(sec: float) -> str:
 @dataclass
 class Sample:
     t: datetime
-    distance_m: Optional[float] = None
-    hr: Optional[int] = None
-    cadence: Optional[int] = None  # usually stroke rate (SPM) in Concept2 FIT
-    watts: Optional[int] = None
-    speed: Optional[float] = None  # m/s
+    distance_m: float | None = None
+    hr: int | None = None
+    cadence: int | None = None  # usually stroke rate (SPM) in Concept2 FIT
+    watts: int | None = None
+    speed: float | None = None  # m/s
 
 
 @dataclass(frozen=True)
@@ -128,13 +129,13 @@ class LapSegment:
     start: datetime
     end: datetime
     intensity: str  # "active" | "rest" | other
-    start_distance_m: Optional[float]
-    total_elapsed_s: Optional[float]
-    total_distance_m: Optional[float]
-    avg_speed_m_s: Optional[float]
-    avg_power_w: Optional[int]
-    avg_cadence_spm: Optional[int]
-    avg_hr_bpm: Optional[int]
+    start_distance_m: float | None
+    total_elapsed_s: float | None
+    total_distance_m: float | None
+    avg_speed_m_s: float | None
+    avg_power_w: int | None
+    avg_cadence_spm: int | None
+    avg_hr_bpm: int | None
 
 
 INTENSITY_MAP = {0: "active", 1: "rest"}
@@ -151,8 +152,8 @@ def normalize_intensity(v: object) -> str:
     return s or "unknown"
 
 
-def parse_fit_messages(fit: FitFile) -> List[Sample]:
-    samples: List[Sample] = []
+def parse_fit_messages(fit: FitFile) -> list[Sample]:
+    samples: list[Sample] = []
     for msg in fit.get_messages("record"):
         fields = {f.name: f.value for f in msg}
         ts = fields.get("timestamp")
@@ -178,13 +179,26 @@ def parse_fit_messages(fit: FitFile) -> List[Sample]:
         speed = fields.get("enhanced_speed", fields.get("speed"))
         speed = float(speed) if isinstance(speed, (int, float)) else None
 
-        samples.append(Sample(t=ts, distance_m=distance_m, hr=hr, cadence=cadence, watts=watts, speed=speed))
+        samples.append(
+            Sample(
+                t=ts,
+                distance_m=distance_m,
+                hr=hr,
+                cadence=cadence,
+                watts=watts,
+                speed=speed,
+            )
+        )
 
     samples.sort(key=lambda s: s.t)
 
     # Fill in missing speeds from distance/time deltas (m/s)
     for i in range(1, len(samples)):
-        if samples[i].speed is None and samples[i].distance_m is not None and samples[i - 1].distance_m is not None:
+        if (
+            samples[i].speed is None
+            and samples[i].distance_m is not None
+            and samples[i - 1].distance_m is not None
+        ):
             dt = (samples[i].t - samples[i - 1].t).total_seconds()
             dd = samples[i].distance_m - samples[i - 1].distance_m
             if dt > 0 and dd >= 0:
@@ -195,14 +209,14 @@ def parse_fit_messages(fit: FitFile) -> List[Sample]:
     return samples
 
 
-def parse_fit(fit_path: str) -> List[Sample]:
+def parse_fit(fit_path: str) -> list[Sample]:
     return parse_fit_messages(FitFile(fit_path))
 
 
 @dataclass(frozen=True)
 class ParsedData:
-    samples: List[Sample]
-    laps: Optional[List[LapSegment]] = None
+    samples: list[Sample]
+    laps: list[LapSegment] | None = None
 
 
 def parse_data_file(path: str) -> ParsedData:
@@ -210,12 +224,12 @@ def parse_data_file(path: str) -> ParsedData:
     if ext == ".fit":
         fit = FitFile(path)
         samples = parse_fit_messages(fit)
-        laps: List[LapSegment] = []
+        laps: list[LapSegment] = []
         # Build a timestamp list for fast lookup of lap start distances.
         ts_list = [s.t for s in samples]
         dist_list = [s.distance_m for s in samples]
 
-        def distance_at(t: datetime) -> Optional[float]:
+        def distance_at(t: datetime) -> float | None:
             idx = min(bisect_left(ts_list, t), len(ts_list) - 1)
             # Prefer the first sample at/after start; fallback to previous if missing distance.
             for j in (idx, idx - 1, idx + 1):
@@ -246,12 +260,24 @@ def parse_data_file(path: str) -> ParsedData:
                     end=end,
                     intensity=normalize_intensity(fields.get("intensity")),
                     start_distance_m=distance_at(start),
-                    total_elapsed_s=float(total_elapsed) if isinstance(total_elapsed, (int, float)) else None,
-                    total_distance_m=float(total_distance) if isinstance(total_distance, (int, float)) else None,
-                    avg_speed_m_s=float(avg_speed) if isinstance(avg_speed, (int, float)) else None,
-                    avg_power_w=int(avg_power) if isinstance(avg_power, (int, float)) else None,
-                    avg_cadence_spm=int(avg_cadence) if isinstance(avg_cadence, (int, float)) else None,
-                    avg_hr_bpm=int(avg_hr) if isinstance(avg_hr, (int, float)) else None,
+                    total_elapsed_s=float(total_elapsed)
+                    if isinstance(total_elapsed, (int, float))
+                    else None,
+                    total_distance_m=float(total_distance)
+                    if isinstance(total_distance, (int, float))
+                    else None,
+                    avg_speed_m_s=float(avg_speed)
+                    if isinstance(avg_speed, (int, float))
+                    else None,
+                    avg_power_w=int(avg_power)
+                    if isinstance(avg_power, (int, float))
+                    else None,
+                    avg_cadence_spm=int(avg_cadence)
+                    if isinstance(avg_cadence, (int, float))
+                    else None,
+                    avg_hr_bpm=int(avg_hr)
+                    if isinstance(avg_hr, (int, float))
+                    else None,
                 )
             )
 
@@ -264,13 +290,18 @@ def parse_data_file(path: str) -> ParsedData:
 # Video probing
 # -----------------------------
 
+
 def run_ffprobe(video_path: str, ffprobe_bin: str) -> dict[str, Any]:
     cmd = [
         ffprobe_bin,
-        "-v", "error",
-        "-print_format", "json",
-        "-show_entries", "format=duration:format_tags:stream=width,height:stream_tags",
-        "-select_streams", "v:0",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_entries",
+        "format=duration:format_tags:stream=width,height:stream_tags",
+        "-select_streams",
+        "v:0",
         video_path,
     ]
     p = subprocess.run(cmd, capture_output=True, text=True)
@@ -282,7 +313,7 @@ def run_ffprobe(video_path: str, ffprobe_bin: str) -> dict[str, Any]:
         raise RuntimeError(f"Could not parse ffprobe JSON output: {e}") from e
 
 
-def extract_creation_time_tag(ffprobe_json: dict) -> Optional[str]:
+def extract_creation_time_tag(ffprobe_json: dict) -> str | None:
     keys = [
         "creation_time",
         "com.apple.quicktime.creationdate",
@@ -307,7 +338,9 @@ def extract_creation_time_tag(ffprobe_json: dict) -> Optional[str]:
     return None
 
 
-def get_video_metadata(video_path: str, ffprobe_bin: str) -> Tuple[int, int, Optional[float], datetime, str]:
+def get_video_metadata(
+    video_path: str, ffprobe_bin: str
+) -> tuple[int, int, float | None, datetime, str]:
     """
     Returns:
       width, height, duration_seconds (or None), creation_time_utc, source_string
@@ -336,7 +369,7 @@ def get_video_metadata(video_path: str, ffprobe_bin: str) -> Tuple[int, int, Opt
     if creation_dt is None:
         # Fallback: filesystem mtime (UTC). Not always accurate, but better than nothing.
         ts = os.path.getmtime(video_path)
-        creation_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        creation_dt = datetime.fromtimestamp(ts, tz=UTC)
         source = "filesystem_mtime_utc"
 
     return w, h, duration, creation_dt, source
@@ -346,22 +379,23 @@ def get_video_metadata(video_path: str, ffprobe_bin: str) -> Tuple[int, int, Opt
 # ASS generation
 # -----------------------------
 
+
 def generate_ass(
-    samples: List[Sample],
+    samples: list[Sample],
     out_ass: str,
     *,
     video_w: int,
     video_h: int,
-    video_duration: Optional[float],
+    video_duration: float | None,
     offset_seconds: float,
     label_font: str,
     value_font: str,
-    value_fs: Optional[int],
-    left_margin: Optional[int],
-    top_margin: Optional[int],
-    bottom_margin: Optional[int],
+    value_fs: int | None,
+    left_margin: int | None,
+    top_margin: int | None,
+    bottom_margin: int | None,
     box_alpha: int,
-    laps: Optional[List[LapSegment]] = None,
+    laps: list[LapSegment] | None = None,
 ) -> None:
     """
     Create a PM5-inspired overlay matching `input/pm5_overlay_modern_grid.ass`:
@@ -412,12 +446,12 @@ def generate_ass(
 
     # Compute per-sample video times
     t0 = samples[0].t
-    start_times: List[float] = []
+    start_times: list[float] = []
     for s in samples:
         vt = (s.t - t0).total_seconds() + offset_seconds
         start_times.append(vt)
 
-    end_times: List[float] = start_times[1:] + [start_times[-1] + 1.0]
+    end_times: list[float] = start_times[1:] + [start_times[-1] + 1.0]
 
     # Determine overlay visibility range
     first_visible = None
@@ -450,14 +484,18 @@ def generate_ass(
     if first_visible is None:
         first_visible = 0.0
     if last_visible is None:
-        last_visible = video_duration if video_duration is not None else (end_times[-1] if end_times else 0.0)
+        last_visible = (
+            video_duration
+            if video_duration is not None
+            else (end_times[-1] if end_times else 0.0)
+        )
     if video_duration is not None:
         last_visible = min(last_visible, video_duration)
 
     # Clamp alpha to 0..255
     box_alpha = max(0, min(255, int(box_alpha)))
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("[Script Info]")
     lines.append("Title: Concept2 PM5 Rowing Overlay (Modern)")
     lines.append("ScriptType: v4.00+")
@@ -468,10 +506,16 @@ def generate_ass(
     lines.append("YCbCr Matrix: TV.709")
     lines.append("")
     lines.append("[V4+ Styles]")
-    lines.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
+    lines.append(
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"
+    )
     # Match `input/pm5_overlay_modern_grid.ass` styles (fonts/sizes are scaled to resolution).
-    lines.append("Style: Box,Arial,1,&H00000000,&H00000000,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1")
-    lines.append(f"Style: Label,{label_font},{label_fs},&H88FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,1,0,1,0,0,8,0,0,0,1")
+    lines.append(
+        "Style: Box,Arial,1,&H00000000,&H00000000,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1"
+    )
+    lines.append(
+        f"Style: Label,{label_font},{label_fs},&H88FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,1,0,1,0,0,8,0,0,0,1"
+    )
     for name, color in (
         ("Time", "&H00FFFFFF"),
         ("Split", "&H00FFCC00"),
@@ -485,7 +529,9 @@ def generate_ass(
         )
     lines.append("")
     lines.append("[Events]")
-    lines.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
+    lines.append(
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+    )
 
     def px(x_1080p: int) -> int:
         return int(round(x_1080p * scale_x))
@@ -512,19 +558,25 @@ def generate_ass(
         f"{{\\pos({origin_x + shadow_dx},{origin_y + shadow_dy})\\p1\\c&H000000&\\alpha&H{alpha_shadow:02X}&\\blur{blur_12}}}"
         f"m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}{{\\p0}}"
     )
-    lines.append(f"Dialogue: 0,{ass_time(first_visible)},{ass_time(last_visible)},Box,,0,0,0,,{shadow_draw}")
+    lines.append(
+        f"Dialogue: 0,{ass_time(first_visible)},{ass_time(last_visible)},Box,,0,0,0,,{shadow_draw}"
+    )
 
     panel_draw = (
         f"{{\\pos({origin_x},{origin_y})\\p1\\c&H101010&\\alpha&H{alpha_border:02X}&\\blur{blur_1}\\bord{bord_2}\\3c&HFFFFFF&\\3a&HD0&}}"
         f"m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}{{\\p0}}"
     )
-    lines.append(f"Dialogue: 1,{ass_time(first_visible)},{ass_time(last_visible)},Box,,0,0,0,,{panel_draw}")
+    lines.append(
+        f"Dialogue: 1,{ass_time(first_visible)},{ass_time(last_visible)},Box,,0,0,0,,{panel_draw}"
+    )
 
     header_draw = (
         f"{{\\pos({origin_x},{origin_y})\\p1\\c&H1E1E1E&\\alpha&H{alpha_main:02X}&}}"
         f"m 0 0 l {box_w} 0 l {box_w} {py(95)} l 0 {py(95)}{{\\p0}}"
     )
-    lines.append(f"Dialogue: 2,{ass_time(first_visible)},{ass_time(last_visible)},Box,,0,0,0,,{header_draw}")
+    lines.append(
+        f"Dialogue: 2,{ass_time(first_visible)},{ass_time(last_visible)},Box,,0,0,0,,{header_draw}"
+    )
 
     def rect_path(x1: int, y1: int, x2: int, y2: int) -> str:
         return f"m {x1} {y1} l {x2} {y1} l {x2} {y2} l {x1} {y2}"
@@ -536,13 +588,43 @@ def generate_ass(
         # row divider
         ("&HFFFFFF&", "E0", 3, rect_path(px(12), py(95), px(408), py(97))),
         # accent bars row 1
-        ("&HFFFFFF&", f"{alpha_main:02X}", 4, rect_path(px(36), py(36), px(104), py(39))),
-        ("&HFFCC00&", f"{alpha_main:02X}", 4, rect_path(px(176), py(36), px(244), py(39))),
-        ("&H66AAFF&", f"{alpha_main:02X}", 4, rect_path(px(316), py(36), px(384), py(39))),
+        (
+            "&HFFFFFF&",
+            f"{alpha_main:02X}",
+            4,
+            rect_path(px(36), py(36), px(104), py(39)),
+        ),
+        (
+            "&HFFCC00&",
+            f"{alpha_main:02X}",
+            4,
+            rect_path(px(176), py(36), px(244), py(39)),
+        ),
+        (
+            "&H66AAFF&",
+            f"{alpha_main:02X}",
+            4,
+            rect_path(px(316), py(36), px(384), py(39)),
+        ),
         # accent bars row 2
-        ("&HFFFFFF&", f"{alpha_main:02X}", 4, rect_path(px(36), py(126), px(104), py(129))),
-        ("&H88FF88&", f"{alpha_main:02X}", 4, rect_path(px(176), py(126), px(244), py(129))),
-        ("&H4444FF&", f"{alpha_main:02X}", 4, rect_path(px(316), py(126), px(384), py(129))),
+        (
+            "&HFFFFFF&",
+            f"{alpha_main:02X}",
+            4,
+            rect_path(px(36), py(126), px(104), py(129)),
+        ),
+        (
+            "&H88FF88&",
+            f"{alpha_main:02X}",
+            4,
+            rect_path(px(176), py(126), px(244), py(129)),
+        ),
+        (
+            "&H4444FF&",
+            f"{alpha_main:02X}",
+            4,
+            rect_path(px(316), py(126), px(384), py(129)),
+        ),
     ]
 
     for color, alpha_hex, layer, path in grid_shapes:
@@ -577,26 +659,27 @@ def generate_ass(
 
     # Per-sample values (6 lines per sample so each value can have its own style/color).
     if laps:
+
         def video_time_to_abs(vt: float) -> datetime:
             return t0 + timedelta(seconds=(vt - offset_seconds))
 
         lap_starts = [l.start for l in laps]
 
-        prev_active_map: dict[int, Optional[LapSegment]] = {}
-        last_active: Optional[LapSegment] = None
+        prev_active_map: dict[int, LapSegment | None] = {}
+        last_active: LapSegment | None = None
         for lap in laps:
             prev_active_map[lap.index] = last_active
             if (lap.intensity or "").lower() == "active":
                 last_active = lap
 
-        def lap_for_abs(t: datetime) -> Optional[LapSegment]:
+        def lap_for_abs(t: datetime) -> LapSegment | None:
             idx = bisect_left(lap_starts, t)
             for i in (idx - 1, idx):
                 if 0 <= i < len(laps) and laps[i].start <= t < laps[i].end:
                     return laps[i]
             return None
 
-        def lap_video_range(lap: LapSegment) -> Optional[Tuple[float, float]]:
+        def lap_video_range(lap: LapSegment) -> tuple[float, float] | None:
             """
             Returns (start_v, end_v) clamped to the video timeline, or None if fully outside.
             """
@@ -607,7 +690,9 @@ def generate_ass(
             if video_duration is not None and vt_start >= video_duration:
                 return None
             start_v = max(0.0, vt_start)
-            end_v = min(vt_end, video_duration) if video_duration is not None else vt_end
+            end_v = (
+                min(vt_end, video_duration) if video_duration is not None else vt_end
+            )
             return (start_v, end_v) if end_v > start_v else None
 
         def emit_distance_dialogue(a: float, b: float, meters: int) -> None:
@@ -647,7 +732,7 @@ def generate_ass(
         ts_abs = [s.t for s in samples]
         dist_abs = [s.distance_m for s in samples]
 
-        def interpolate_distance_at(t: datetime) -> Optional[float]:
+        def interpolate_distance_at(t: datetime) -> float | None:
             idx = bisect_left(ts_abs, t)
             if idx <= 0:
                 return dist_abs[0] if dist_abs else None
@@ -663,7 +748,9 @@ def generate_ass(
             alpha = (t - t0_i).total_seconds() / dt
             return float(d0_i + (d1_i - d0_i) * alpha)
 
-        def estimate_distance_at(t: datetime, *, lap: LapSegment, lap_start_dist: float, lap_end_dist: float) -> float:
+        def estimate_distance_at(
+            t: datetime, *, lap: LapSegment, lap_start_dist: float, lap_end_dist: float
+        ) -> float:
             if not ts_abs or not dist_abs:
                 return lap_start_dist
 
@@ -673,7 +760,9 @@ def generate_ass(
                     dt = (ts_abs[0] - lap.start).total_seconds()
                     if dt > 0:
                         alpha = (t - lap.start).total_seconds() / dt
-                        return float(lap_start_dist + (float(d0) - lap_start_dist) * alpha)
+                        return float(
+                            lap_start_dist + (float(d0) - lap_start_dist) * alpha
+                        )
                 return lap_start_dist
 
             if t >= ts_abs[-1]:
@@ -719,13 +808,17 @@ def generate_ass(
             else:
                 lap_end_dist = interpolate_distance_at(lap.end)
                 if lap_end_dist is not None:
-                    lap_total_m = int(round(max(0.0, float(lap_end_dist) - lap_start_dist)))
+                    lap_total_m = int(
+                        round(max(0.0, float(lap_end_dist) - lap_start_dist))
+                    )
             if lap_total_m is None or lap_total_m <= 0:
                 continue
 
             # The Distance field shows lap meters (relative to lap start).
             # Layer 9 sits above per-sample values so interpolation always wins.
-            end_clip = max(start_v, end_v - 0.01)  # avoid inclusive-end overlap with REST
+            end_clip = max(
+                start_v, end_v - 0.01
+            )  # avoid inclusive-end overlap with REST
             final_hold_s = 0.05
             final_change_v = max(start_v, end_clip - final_hold_s)
             # Bias meter ticks towards the end of each record interval.
@@ -738,7 +831,12 @@ def generate_ass(
             if abs_seg_start >= lap.end:
                 continue
             prev_t = abs_seg_start
-            prev_d = estimate_distance_at(prev_t, lap=lap, lap_start_dist=lap_start_dist, lap_end_dist=lap_end_dist)
+            prev_d = estimate_distance_at(
+                prev_t,
+                lap=lap,
+                lap_start_dist=lap_start_dist,
+                lap_end_dist=lap_end_dist,
+            )
             prev_d = min(max(prev_d, lap_start_dist), lap_end_dist)
             eps = 1e-6
             m_start_v = max(0, int(math.floor((prev_d - lap_start_dist) + eps)))
@@ -746,10 +844,10 @@ def generate_ass(
             m_start_v = min(m_start_v, max(0, lap_total_m - 1))
 
             # Build a list of (vt, meters) change points.
-            changes: List[Tuple[float, int]] = [(start_v, m_start_v)]
+            changes: list[tuple[float, int]] = [(start_v, m_start_v)]
 
             # Iterate through distance samples in-lap, plus a synthetic endpoint at lap end.
-            points: List[Tuple[datetime, float]] = []
+            points: list[tuple[datetime, float]] = []
             j0 = bisect_left(ts_abs, prev_t)
             for i in range(j0, i1):
                 d_i = dist_abs[i]
@@ -779,8 +877,12 @@ def generate_ass(
                         target = lap_start_dist + float(m)
                         alpha = (target - prev_d) / (d_i - prev_d)
                         alpha = max(0.0, min(1.0, alpha))
-                        alpha_b = interval_bias_start + (1.0 - interval_bias_start) * alpha
-                        abs_t = prev_t + timedelta(seconds=(t_i - prev_t).total_seconds() * alpha_b)
+                        alpha_b = (
+                            interval_bias_start + (1.0 - interval_bias_start) * alpha
+                        )
+                        abs_t = prev_t + timedelta(
+                            seconds=(t_i - prev_t).total_seconds() * alpha_b
+                        )
                         vt = (abs_t - t0).total_seconds() + offset_seconds
                         if vt >= final_change_v:
                             break
@@ -795,7 +897,7 @@ def generate_ass(
             # Emit segments between change points, clamped to the lap.
             changes.sort(key=lambda x: x[0])
             # Enforce monotonic timestamps and drop degenerate/duplicate changes.
-            dedup: List[Tuple[float, int]] = []
+            dedup: list[tuple[float, int]] = []
             last_vt = None
             last_m = None
             min_dt = 0.011  # 1 centisecond + epsilon (ASS timestamp resolution)
@@ -836,7 +938,9 @@ def generate_ass(
                 f"m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}{{\\p0}}"
             )
             # Layer 2 sits above the normal header strip but below grid/text.
-            lines.append(f"Dialogue: 2,{ass_time(st_h)},{ass_time(et_h)},Box,,0,0,0,,{rest_backdrop_draw}")
+            lines.append(
+                f"Dialogue: 2,{ass_time(st_h)},{ass_time(et_h)},Box,,0,0,0,,{rest_backdrop_draw}"
+            )
 
             # Bright border during rest (drawn as thin filled rectangles).
             top = rect_path(0, 0, box_w, rest_border_th)
@@ -857,10 +961,10 @@ def generate_ass(
             st_h, et_h = rng
 
             state = "REST" if (lap.intensity or "").lower() == "rest" else "WORK"
-            header_left_text = (
-                f"{{\\an7\\pos({origin_x + px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}LAP {lap.index:02d} \u00b7 {state}"
+            header_left_text = f"{{\\an7\\pos({origin_x + px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}LAP {lap.index:02d} \u00b7 {state}"
+            lines.append(
+                f"Dialogue: 10,{ass_time(st_h)},{ass_time(et_h)},Label,,0,0,0,,{header_left_text}"
             )
-            lines.append(f"Dialogue: 10,{ass_time(st_h)},{ass_time(et_h)},Label,,0,0,0,,{header_left_text}")
 
         # Per-second rest overlays (FIT often has sparse/no records during rest).
         for lap in laps:
@@ -891,9 +995,15 @@ def generate_ass(
             if prev_active is not None:
                 prev_elapsed_s = prev_active.total_elapsed_s
                 if prev_elapsed_s is None:
-                    prev_elapsed_s = (prev_active.end - prev_active.start).total_seconds()
+                    prev_elapsed_s = (
+                        prev_active.end - prev_active.start
+                    ).total_seconds()
                 time_str = format_elapsed(prev_elapsed_s)
-                meters_str = f"{int(round(prev_active.total_distance_m)):d}" if prev_active.total_distance_m is not None else "---"
+                meters_str = (
+                    f"{int(round(prev_active.total_distance_m)):d}"
+                    if prev_active.total_distance_m is not None
+                    else "---"
+                )
                 split_str = prev_pace
                 spm_str = prev_spm
                 watts_str = prev_watts
@@ -908,12 +1018,24 @@ def generate_ass(
 
             # Constant fields over the whole REST lap (minimize dialogue spam).
             # Use high layer so these sit above any lingering work sample events.
-            lines.append(f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{time_str}")
-            lines.append(f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{split_str}")
-            lines.append(f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}")
-            lines.append(f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}")
-            lines.append(f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{watts_str}")
-            lines.append(f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{hr_str}")
+            lines.append(
+                f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{time_str}"
+            )
+            lines.append(
+                f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{split_str}"
+            )
+            lines.append(
+                f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}"
+            )
+            lines.append(
+                f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}"
+            )
+            lines.append(
+                f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{watts_str}"
+            )
+            lines.append(
+                f"Dialogue: 20,{ass_time(start_v)},{ass_time(end_v)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{hr_str}"
+            )
 
             # Per-second REST countdown only (ticks smoothly).
             rest_total = lap.total_elapsed_s
@@ -930,10 +1052,10 @@ def generate_ass(
 
                 lap_elapsed = max(0.0, t - lap_vt_start)
                 rest_remaining = max(0.0, rest_total - lap_elapsed)
-                header_right_text = (
-                    f"{{\\an9\\pos({origin_x + box_w - px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}REST {format_elapsed(rest_remaining)}"
+                header_right_text = f"{{\\an9\\pos({origin_x + box_w - px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}REST {format_elapsed(rest_remaining)}"
+                lines.append(
+                    f"Dialogue: 21,{ass_time(t)},{ass_time(tn)},Label,,0,0,0,,{header_right_text}"
                 )
-                lines.append(f"Dialogue: 21,{ass_time(t)},{ass_time(tn)},Label,,0,0,0,,{header_right_text}")
 
                 t = tn
 
@@ -950,7 +1072,7 @@ def generate_ass(
         if et_clip <= st_clip:
             continue
 
-        current_lap: Optional[LapSegment] = lap_for_abs(s.t) if laps else None
+        current_lap: LapSegment | None = lap_for_abs(s.t) if laps else None
 
         lap_intensity = (current_lap.intensity if current_lap else "active").lower()
         is_rest = lap_intensity == "rest"
@@ -971,14 +1093,18 @@ def generate_ass(
             lap_elapsed = (s.t - current_lap.start).total_seconds()
             lap_elapsed_str = format_elapsed(lap_elapsed)
             if current_lap.start_distance_m is not None and s.distance_m is not None:
-                lap_meters = max(0, int(round(s.distance_m - current_lap.start_distance_m)))
+                lap_meters = max(
+                    0, int(round(s.distance_m - current_lap.start_distance_m))
+                )
                 meters_str = f"{lap_meters:d}"
             else:
                 meters_str = "---"
         else:
             elapsed = (s.t - t0).total_seconds()
             lap_elapsed_str = format_elapsed(elapsed)
-            meters_str = f"{int(round(s.distance_m)):d}" if s.distance_m is not None else "---"
+            meters_str = (
+                f"{int(round(s.distance_m)):d}" if s.distance_m is not None else "---"
+            )
 
         pace_sec = 500.0 / s.speed if (s.speed is not None and s.speed > 0) else None
         pace_str = format_pace(pace_sec)
@@ -992,14 +1118,22 @@ def generate_ass(
             lines.append(
                 f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{lap_elapsed_str}"
             )
-        lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{pace_str}")
-        lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}")
+        lines.append(
+            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{pace_str}"
+        )
+        lines.append(
+            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}"
+        )
         # Always emit per-sample meters as a fallback; per-meter interpolation (layer 9) overrides it.
         lines.append(
             f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}"
         )
-        lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{watts_str}")
-        lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{hr_str}")
+        lines.append(
+            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{watts_str}"
+        )
+        lines.append(
+            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{hr_str}"
+        )
 
     Path(out_ass).write_text("\n".join(lines), encoding="utf-8")
 
@@ -1007,6 +1141,7 @@ def generate_ass(
 # -----------------------------
 # ffmpeg burn-in
 # -----------------------------
+
 
 def burn_in(
     video_in: str,
@@ -1037,13 +1172,20 @@ def burn_in(
     cmd = [
         ffmpeg_bin,
         "-y",
-        "-i", video_in,
-        "-vf", vf,
-        "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-crf", str(crf),
-        "-preset", preset,
+        "-i",
+        video_in,
+        "-vf",
+        vf,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-crf",
+        str(crf),
+        "-preset",
+        preset,
     ]
     if copy_audio:
         cmd += ["-c:a", "copy"]
@@ -1061,7 +1203,10 @@ def burn_in(
 # Alignment helpers
 # -----------------------------
 
-def choose_anchor_index(samples: List[Sample], *, video_start: datetime, mode: str) -> int:
+
+def choose_anchor_index(
+    samples: list[Sample], *, video_start: datetime, mode: str
+) -> int:
     """
     Pick which sample becomes t0.
 
@@ -1094,6 +1239,7 @@ def choose_anchor_index(samples: List[Sample], *, video_start: datetime, mode: s
 # CLI
 # -----------------------------
 
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="c2_overlay.py",
@@ -1101,35 +1247,92 @@ def main() -> int:
     )
     ap.add_argument("video", help="Input video file (mp4/mov/etc)")
     ap.add_argument("fit", help="Concept2 workout data file (.fit)")
-    ap.add_argument("-o", "--out-ass", default=None, help="Output .ass path (default: next to input video)")
+    ap.add_argument(
+        "-o",
+        "--out-ass",
+        default=None,
+        help="Output .ass path (default: next to input video)",
+    )
 
-    ap.add_argument("--offset", type=float, default=0.0,
-                    help="Manual offset adjustment in seconds (added to the auto-computed alignment). "
-                         "Positive makes data appear later; negative earlier.")
+    ap.add_argument(
+        "--offset",
+        type=float,
+        default=0.0,
+        help="Manual offset adjustment in seconds (added to the auto-computed alignment). "
+        "Positive makes data appear later; negative earlier.",
+    )
     ap.add_argument(
         "--font",
         default=None,
         help="Legacy alias: set both --label-font and --value-font to this font name.",
     )
-    ap.add_argument("--label-font", default="PragmataPro", help="Font for labels (must exist on your system)")
-    ap.add_argument("--value-font", default="PragmataPro Mono", help="Font for values (must exist on your system)")
-    ap.add_argument("--fontsize", type=int, default=None, help="Value font size (default: scaled from 52 @ 1080p)")
-    ap.add_argument("--left-margin", type=int, default=None, help="Left margin in pixels (default: scaled from 20 @ 1080p)")
-    ap.add_argument("--top-margin", type=int, default=None,
-                    help="Top margin in pixels; if set, positions the overlay from the top instead of the bottom.")
-    ap.add_argument("--bottom-margin", type=int, default=None, help="Bottom margin in pixels (default: scaled from 20 @ 1080p)")
-    ap.add_argument("--box-alpha", type=int, default=112,
-                    help="Background box transparency 0..255 (0=opaque, 255=fully transparent). Default: 112.")
+    ap.add_argument(
+        "--label-font",
+        default="PragmataPro",
+        help="Font for labels (must exist on your system)",
+    )
+    ap.add_argument(
+        "--value-font",
+        default="PragmataPro Mono",
+        help="Font for values (must exist on your system)",
+    )
+    ap.add_argument(
+        "--fontsize",
+        type=int,
+        default=None,
+        help="Value font size (default: scaled from 52 @ 1080p)",
+    )
+    ap.add_argument(
+        "--left-margin",
+        type=int,
+        default=None,
+        help="Left margin in pixels (default: scaled from 20 @ 1080p)",
+    )
+    ap.add_argument(
+        "--top-margin",
+        type=int,
+        default=None,
+        help="Top margin in pixels; if set, positions the overlay from the top instead of the bottom.",
+    )
+    ap.add_argument(
+        "--bottom-margin",
+        type=int,
+        default=None,
+        help="Bottom margin in pixels (default: scaled from 20 @ 1080p)",
+    )
+    ap.add_argument(
+        "--box-alpha",
+        type=int,
+        default=112,
+        help="Background box transparency 0..255 (0=opaque, 255=fully transparent). Default: 112.",
+    )
 
-    ap.add_argument("--burn-in", metavar="OUT_VIDEO", default=None,
-                    help="If set, burn the overlay into a new video using ffmpeg.")
-    ap.add_argument("--crf", type=int, default=18, help="x264 CRF for burn-in (default: 18)")
-    ap.add_argument("--preset", default="veryfast", help="x264 preset for burn-in (default: veryfast)")
-    ap.add_argument("--reencode-audio", action="store_true",
-                    help="Re-encode audio to AAC instead of stream-copying it (use if -c:a copy fails).")
+    ap.add_argument(
+        "--burn-in",
+        metavar="OUT_VIDEO",
+        default=None,
+        help="If set, burn the overlay into a new video using ffmpeg.",
+    )
+    ap.add_argument(
+        "--crf", type=int, default=18, help="x264 CRF for burn-in (default: 18)"
+    )
+    ap.add_argument(
+        "--preset",
+        default="veryfast",
+        help="x264 preset for burn-in (default: veryfast)",
+    )
+    ap.add_argument(
+        "--reencode-audio",
+        action="store_true",
+        help="Re-encode audio to AAC instead of stream-copying it (use if -c:a copy fails).",
+    )
 
-    ap.add_argument("--ffprobe-bin", default="ffprobe", help="Path to ffprobe (default: ffprobe)")
-    ap.add_argument("--ffmpeg-bin", default="ffmpeg", help="Path to ffmpeg (default: ffmpeg)")
+    ap.add_argument(
+        "--ffprobe-bin", default="ffprobe", help="Path to ffprobe (default: ffprobe)"
+    )
+    ap.add_argument(
+        "--ffmpeg-bin", default="ffmpeg", help="Path to ffmpeg (default: ffmpeg)"
+    )
     ap.add_argument(
         "--anchor",
         "--tcx-anchor",
@@ -1167,10 +1370,14 @@ def main() -> int:
     data_start = samples_all[0].t
 
     # Probe video
-    w, h, duration, video_creation, source = get_video_metadata(video_path, ffprobe_bin=args.ffprobe_bin)
+    w, h, duration, video_creation, source = get_video_metadata(
+        video_path, ffprobe_bin=args.ffprobe_bin
+    )
 
     # Choose anchor (t0) used for both alignment and displayed elapsed time.
-    anchor_idx = choose_anchor_index(samples_all, video_start=video_creation, mode=args.anchor)
+    anchor_idx = choose_anchor_index(
+        samples_all, video_start=video_creation, mode=args.anchor
+    )
     samples = samples_all[anchor_idx:] if anchor_idx else samples_all
     anchor_time = samples[0].t
 
@@ -1181,20 +1388,32 @@ def main() -> int:
     print("== Alignment ==")
     print(f"Video creation/start time (UTC): {video_creation.isoformat()}  [{source}]")
     if duration is not None:
-        video_end = datetime.fromtimestamp(video_creation.timestamp() + duration, tz=timezone.utc)
-        print(f"Video end time (UTC):            {video_end.isoformat()}  [duration {duration:.2f} s]")
+        video_end = datetime.fromtimestamp(
+            video_creation.timestamp() + duration, tz=UTC
+        )
+        print(
+            f"Video end time (UTC):            {video_end.isoformat()}  [duration {duration:.2f} s]"
+        )
     print(f"FIT file: {data_path}")
     print(f"FIT first timestamp (UTC):       {data_start.isoformat()}")
     delta0 = (data_start - video_creation).total_seconds()
     if abs(delta0) >= 1.0:
         when = "after" if delta0 > 0 else "before"
-        print(f"FIT starts {abs(delta0):.1f} s {when} video start (based on absolute timestamps).")
-    first_row_visible = next((s for s in samples_all if s.t >= video_creation and (s.cadence or 0) > 0), None)
+        print(
+            f"FIT starts {abs(delta0):.1f} s {when} video start (based on absolute timestamps)."
+        )
+    first_row_visible = next(
+        (s for s in samples_all if s.t >= video_creation and (s.cadence or 0) > 0), None
+    )
     if first_row_visible is not None:
         tv = (first_row_visible.t - video_creation).total_seconds()
-        print(f"First sample with cadence>0 during video: t={tv:.1f} s  [{first_row_visible.t.isoformat()}]")
+        print(
+            f"First sample with cadence>0 during video: t={tv:.1f} s  [{first_row_visible.t.isoformat()}]"
+        )
     if anchor_time != data_start:
-        print(f"Data anchor ({args.anchor}) time (UTC): {anchor_time.isoformat()}  [idx {anchor_idx}]")
+        print(
+            f"Data anchor ({args.anchor}) time (UTC): {anchor_time.isoformat()}  [idx {anchor_idx}]"
+        )
     print(f"Auto offset (anchor - video_start): {auto_offset:+.3f} s")
     if args.offset:
         print(f"Manual adjustment: {args.offset:+.3f} s")
