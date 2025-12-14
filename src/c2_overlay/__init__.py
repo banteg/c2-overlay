@@ -79,13 +79,20 @@ def to_utc(dt: datetime) -> datetime:
 
 def format_elapsed(sec: float) -> str:
     """Format elapsed seconds like PM5: MM:SS or H:MM:SS."""
-    if sec < 0:
-        sec = 0.0
-    total = int(round(sec))
+    total = int(math.floor(max(0.0, sec)))
     h = total // 3600
     m = (total % 3600) // 60
     s = total % 60
     # PM5 typically shows minutes without zero-padding (e.g. "0:03", not "00:03").
+    return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m}:{s:02d}"
+
+
+def format_remaining(sec: float) -> str:
+    """Format remaining seconds like PM5: use ceil to avoid hitting 0 early."""
+    total = int(math.ceil(max(0.0, sec)))
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
     return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m}:{s:02d}"
 
 
@@ -306,11 +313,19 @@ def run_ffprobe(video_path: str, ffprobe_bin: str) -> dict[str, Any]:
     ]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
-        raise RuntimeError(f"ffprobe failed (code {p.returncode}):\n{p.stderr.strip()}")
+        msg = f"ffprobe failed (code {p.returncode})."
+        if p.stderr:
+            msg += f"\nstderr:\n{p.stderr.strip()}"
+        if p.stdout:
+            msg += f"\nstdout:\n{p.stdout.strip()}"
+        raise RuntimeError(msg)
     try:
         return json.loads(p.stdout)
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"Could not parse ffprobe JSON output: {e}") from e
+        out = (p.stdout or "").strip()
+        if len(out) > 800:
+            out = out[:800] + "..."
+        raise RuntimeError(f"Could not parse ffprobe JSON output: {e}\nstdout:\n{out}") from e
 
 
 def extract_creation_time_tag(ffprobe_json: dict) -> str | None:
@@ -361,6 +376,11 @@ def get_video_metadata(
     source = "ffprobe:creation_time"
     creation_dt = None
     if tag:
+        if not re.search(r"(Z|[+-]\\d{2}:?\\d{2})$", tag.strip()):
+            print(
+                f"WARNING: ffprobe creation_time has no timezone; assuming UTC: {tag}",
+                file=sys.stderr,
+            )
         try:
             creation_dt = parse_iso8601(tag)
         except Exception:
@@ -404,7 +424,8 @@ def generate_ass(
         METERS / WATTS / BPM
 
     offset_seconds is the computed (or overridden) shift that maps:
-      video_time = (sample_time - data_start_time) + offset_seconds
+      video_time = (sample_time - t0) + offset_seconds
+    where t0 is the selected anchor sample time (samples[0].t).
     """
     if not samples:
         raise ValueError("No samples found.")
@@ -454,16 +475,21 @@ def generate_ass(
     end_times: list[float] = start_times[1:] + [start_times[-1] + 1.0]
 
     # Determine overlay visibility range
-    first_visible = None
-    last_visible = None
+    has_overlap = False
+    first_visible: float | None = None
+    last_visible: float | None = None
     for st, et in zip(start_times, end_times):
         if et <= 0:
             continue
         if video_duration is not None and st >= video_duration:
             break
-        if first_visible is None:
-            first_visible = max(0.0, st)
-        last_visible = et if last_visible is None else max(last_visible, et)
+        st_clip = max(0.0, st)
+        et_clip = min(et, video_duration) if video_duration is not None else et
+        if et_clip <= st_clip:
+            continue
+        first_visible = st_clip if first_visible is None else min(first_visible, st_clip)
+        last_visible = et_clip if last_visible is None else max(last_visible, et_clip)
+        has_overlap = True
 
     # Include lap-based overlays too (REST intervals can have sparse/no records).
     if laps:
@@ -480,17 +506,15 @@ def generate_ass(
                 continue
             first_visible = st if first_visible is None else min(first_visible, st)
             last_visible = et if last_visible is None else max(last_visible, et)
+            has_overlap = True
 
-    if first_visible is None:
-        first_visible = 0.0
-    if last_visible is None:
-        last_visible = (
-            video_duration
-            if video_duration is not None
-            else (end_times[-1] if end_times else 0.0)
+    if not has_overlap:
+        raise ValueError(
+            "No FIT samples overlap the video timeline. "
+            "Check the video's creation_time tag or adjust with --offset/--anchor."
         )
-    if video_duration is not None:
-        last_visible = min(last_visible, video_duration)
+    if first_visible is None or last_visible is None:
+        raise RuntimeError("Internal error: visibility range not computed despite overlap.")
 
     # Clamp alpha to 0..255
     box_alpha = max(0, min(255, int(box_alpha)))
@@ -1048,8 +1072,6 @@ def generate_ass(
             rest_total = lap.total_elapsed_s
             if rest_total is None:
                 rest_total = (lap.end - lap.start).total_seconds()
-            lap_vt_start = (lap.start - t0).total_seconds() + offset_seconds
-            lap_vt_start = max(0.0, lap_vt_start)
 
             t = start_v
             while t < end_v:
@@ -1057,9 +1079,10 @@ def generate_ass(
                 if tn <= t:
                     tn = min(end_v, t + 1.0)
 
-                lap_elapsed = max(0.0, t - lap_vt_start)
+                abs_t = video_time_to_abs(t)
+                lap_elapsed = max(0.0, (abs_t - lap.start).total_seconds())
                 rest_remaining = max(0.0, rest_total - lap_elapsed)
-                header_right_text = f"{{\\an9\\pos({origin_x + box_w - px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}REST {format_elapsed(rest_remaining)}"
+                header_right_text = f"{{\\an9\\pos({origin_x + box_w - px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}REST {format_remaining(rest_remaining)}"
                 lines.append(
                     f"Dialogue: 21,{ass_time(t)},{ass_time(tn)},Label,,0,0,0,,{header_right_text}"
                 )
@@ -1395,9 +1418,7 @@ def main() -> int:
     print("== Alignment ==")
     print(f"Video creation/start time (UTC): {video_creation.isoformat()}  [{source}]")
     if duration is not None:
-        video_end = datetime.fromtimestamp(
-            video_creation.timestamp() + duration, tz=UTC
-        )
+        video_end = video_creation + timedelta(seconds=duration)
         print(
             f"Video end time (UTC):            {video_end.isoformat()}  [duration {duration:.2f} s]"
         )
@@ -1436,22 +1457,26 @@ def main() -> int:
     if args.font:
         label_font = args.font
         value_font = args.font
-    generate_ass(
-        samples=samples,
-        out_ass=out_ass,
-        video_w=w,
-        video_h=h,
-        video_duration=duration,
-        offset_seconds=offset,
-        label_font=label_font,
-        value_font=value_font,
-        value_fs=args.fontsize,
-        left_margin=args.left_margin,
-        top_margin=args.top_margin,
-        bottom_margin=args.bottom_margin,
-        box_alpha=args.box_alpha,
-        laps=parsed.laps,
-    )
+    try:
+        generate_ass(
+            samples=samples,
+            out_ass=out_ass,
+            video_w=w,
+            video_h=h,
+            video_duration=duration,
+            offset_seconds=offset,
+            label_font=label_font,
+            value_font=value_font,
+            value_fs=args.fontsize,
+            left_margin=args.left_margin,
+            top_margin=args.top_margin,
+            bottom_margin=args.bottom_margin,
+            box_alpha=args.box_alpha,
+            laps=parsed.laps,
+        )
+    except Exception as e:
+        print(f"ERROR: Could not generate ASS overlay:\n{e}", file=sys.stderr)
+        return 2
     print(f"Wrote ASS overlay: {out_ass}")
 
     # Burn-in (optional)
