@@ -396,6 +396,60 @@ def get_video_metadata(
     return w, h, duration, creation_dt, source
 
 
+def compute_visibility_range(
+    *,
+    start_times: list[float],
+    end_times: list[float],
+    video_duration: float | None,
+    laps: list[LapSegment] | None,
+    t0: datetime,
+    offset_seconds: float,
+) -> tuple[float, float]:
+    has_overlap = False
+    first_visible: float | None = None
+    last_visible: float | None = None
+
+    for st, et in zip(start_times, end_times):
+        if et <= 0:
+            continue
+        if video_duration is not None and st >= video_duration:
+            break
+        st_clip = max(0.0, st)
+        et_clip = min(et, video_duration) if video_duration is not None else et
+        if et_clip <= st_clip:
+            continue
+        first_visible = st_clip if first_visible is None else min(first_visible, st_clip)
+        last_visible = et_clip if last_visible is None else max(last_visible, et_clip)
+        has_overlap = True
+
+    # Include lap-based overlays too (REST intervals can have sparse/no records).
+    if laps:
+        for lap in laps:
+            vt_start = (lap.start - t0).total_seconds() + offset_seconds
+            vt_end = (lap.end - t0).total_seconds() + offset_seconds
+            if vt_end <= 0:
+                continue
+            if video_duration is not None and vt_start >= video_duration:
+                continue
+            st = max(0.0, vt_start)
+            et = min(vt_end, video_duration) if video_duration is not None else vt_end
+            if et <= st:
+                continue
+            first_visible = st if first_visible is None else min(first_visible, st)
+            last_visible = et if last_visible is None else max(last_visible, et)
+            has_overlap = True
+
+    if not has_overlap:
+        raise ValueError(
+            "No FIT samples overlap the video timeline. "
+            "Check the video's creation_time tag or adjust with --offset/--anchor."
+        )
+    if first_visible is None or last_visible is None:
+        raise RuntimeError("Internal error: visibility range not computed despite overlap.")
+
+    return first_visible, last_visible
+
+
 # -----------------------------
 # ASS generation
 # -----------------------------
@@ -477,46 +531,14 @@ def generate_ass(
     end_times: list[float] = start_times[1:] + [start_times[-1] + 1.0]
 
     # Determine overlay visibility range
-    has_overlap = False
-    first_visible: float | None = None
-    last_visible: float | None = None
-    for st, et in zip(start_times, end_times):
-        if et <= 0:
-            continue
-        if video_duration is not None and st >= video_duration:
-            break
-        st_clip = max(0.0, st)
-        et_clip = min(et, video_duration) if video_duration is not None else et
-        if et_clip <= st_clip:
-            continue
-        first_visible = st_clip if first_visible is None else min(first_visible, st_clip)
-        last_visible = et_clip if last_visible is None else max(last_visible, et_clip)
-        has_overlap = True
-
-    # Include lap-based overlays too (REST intervals can have sparse/no records).
-    if laps:
-        for lap in laps:
-            vt_start = (lap.start - t0).total_seconds() + offset_seconds
-            vt_end = (lap.end - t0).total_seconds() + offset_seconds
-            if vt_end <= 0:
-                continue
-            if video_duration is not None and vt_start >= video_duration:
-                continue
-            st = max(0.0, vt_start)
-            et = min(vt_end, video_duration) if video_duration is not None else vt_end
-            if et <= st:
-                continue
-            first_visible = st if first_visible is None else min(first_visible, st)
-            last_visible = et if last_visible is None else max(last_visible, et)
-            has_overlap = True
-
-    if not has_overlap:
-        raise ValueError(
-            "No FIT samples overlap the video timeline. "
-            "Check the video's creation_time tag or adjust with --offset/--anchor."
-        )
-    if first_visible is None or last_visible is None:
-        raise RuntimeError("Internal error: visibility range not computed despite overlap.")
+    first_visible, last_visible = compute_visibility_range(
+        start_times=start_times,
+        end_times=end_times,
+        video_duration=video_duration,
+        laps=laps,
+        t0=t0,
+        offset_seconds=offset_seconds,
+    )
 
     # Clamp alpha to 0..255
     box_alpha = max(0, min(255, int(box_alpha)))
