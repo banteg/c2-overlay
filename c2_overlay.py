@@ -752,6 +752,48 @@ def generate_ass(
                     return l
             return None
 
+        # Rest backdrop tint (changes the panel background color during rest intervals).
+        rest_backdrop_color = "&H5A4636&"  # slightly brighter, blue-tinted (BGR)
+        rest_border_color = "&HFFCC00&"  # bright blue/cyan (matches Split accent)
+        rest_border_alpha = "40"  # 00 opaque .. FF transparent
+        rest_border_th = max(1, int(round(3 * blur_scale)))
+        for lap in laps:
+            if (lap.intensity or "").lower() != "rest":
+                continue
+
+            vt_start = (lap.start - t0).total_seconds() + offset_seconds
+            vt_end = (lap.end - t0).total_seconds() + offset_seconds
+            if vt_end <= 0:
+                continue
+            if video_duration is not None and vt_start >= video_duration:
+                continue
+
+            st_h = max(0.0, vt_start)
+            et_h = vt_end
+            if video_duration is not None:
+                et_h = min(et_h, video_duration)
+            if et_h <= st_h:
+                continue
+
+            rest_backdrop_draw = (
+                f"{{\\pos({origin_x},{origin_y})\\p1\\c{rest_backdrop_color}\\alpha&H{alpha_main:02X}&}}"
+                f"m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}{{\\p0}}"
+            )
+            # Layer 2 sits above the normal header strip but below grid/text.
+            lines.append(f"Dialogue: 2,{ass_time(st_h)},{ass_time(et_h)},Box,,0,0,0,,{rest_backdrop_draw}")
+
+            # Bright border during rest (drawn as thin filled rectangles).
+            top = rect_path(0, 0, box_w, rest_border_th)
+            bottom = rect_path(0, box_h - rest_border_th, box_w, box_h)
+            left = rect_path(0, 0, rest_border_th, box_h)
+            right = rect_path(box_w - rest_border_th, 0, box_w, box_h)
+            for path in (top, bottom, left, right):
+                lines.append(
+                    f"Dialogue: 4,{ass_time(st_h)},{ass_time(et_h)},Box,,0,0,0,,"
+                    f"{{\\pos({origin_x},{origin_y})\\p1\\c{rest_border_color}\\alpha&H{rest_border_alpha}&\\blur{blur_1}}}"
+                    f"{path}{{\\p0}}"
+                )
+
         # Lap header (ensures lap number/state is visible even if samples are sparse).
         for lap in laps:
             vt_start = (lap.start - t0).total_seconds() + offset_seconds
