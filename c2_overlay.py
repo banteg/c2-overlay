@@ -793,7 +793,7 @@ def main() -> int:
     )
     ap.add_argument("video", help="Input video file (mp4/mov/etc)")
     ap.add_argument("tcx", help="Workout data file (.tcx, .fit, or Concept2 .csv)")
-    ap.add_argument("-o", "--out-ass", default="overlay.ass", help="Output .ass path (default: overlay.ass)")
+    ap.add_argument("-o", "--out-ass", default=None, help="Output .ass path (default: next to input video)")
 
     ap.add_argument("--offset", type=float, default=0.0,
                     help="Manual offset adjustment in seconds (added to the auto-computed alignment). "
@@ -841,7 +841,7 @@ def main() -> int:
 
     video_path = args.video
     data_path = args.tcx
-    out_ass = args.out_ass
+    out_ass = args.out_ass or str(Path(video_path).with_suffix(".ass"))
 
     # Parse data (tcx/fit/csv)
     try:
