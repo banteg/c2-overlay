@@ -17,3 +17,8 @@ c2-overlay-lint = "c2_overlay.ass_lint:main"
 
 [tool.uv]
 package = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
