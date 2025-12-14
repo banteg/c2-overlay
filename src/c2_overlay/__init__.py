@@ -419,12 +419,6 @@ def generate_ass(
     box_alpha = max(0, min(255, int(box_alpha)))
     box_a = f"{box_alpha:02X}"  # for \alpha
 
-    # ASS colours are &HAABBGGRR (alpha first)
-    # Sample palette:
-    # - text colors include alpha in the colour literals
-    # - vector box fill uses \c + \alpha override
-    black = "&H00000000"
-
     lines: List[str] = []
     lines.append("[Script Info]")
     lines.append("Title: Concept2 PM5 Rowing Overlay (Modern)")
@@ -548,30 +542,44 @@ def generate_ass(
         def video_time_to_abs(vt: float) -> datetime:
             return t0 + timedelta(seconds=(vt - offset_seconds))
 
+        lap_starts = [l.start for l in laps]
+
         def lap_for_abs(t: datetime) -> Optional[LapSegment]:
-            for l in laps:
-                if l.start <= t < l.end:
-                    return l
+            idx = bisect_left(lap_starts, t)
+            for i in (idx - 1, idx):
+                if 0 <= i < len(laps) and laps[i].start <= t < laps[i].end:
+                    return laps[i]
             return None
+
+        def lap_video_range(lap: LapSegment) -> Optional[Tuple[float, float]]:
+            """
+            Returns (start_v, end_v) clamped to the video timeline, or None if fully outside.
+            """
+            vt_start = (lap.start - t0).total_seconds() + offset_seconds
+            vt_end = (lap.end - t0).total_seconds() + offset_seconds
+            if vt_end <= 0:
+                return None
+            if video_duration is not None and vt_start >= video_duration:
+                return None
+            start_v = max(0.0, vt_start)
+            end_v = min(vt_end, video_duration) if video_duration is not None else vt_end
+            return (start_v, end_v) if end_v > start_v else None
+
+        def emit_distance_dialogue(a: float, b: float, meters: int) -> None:
+            if b <= a:
+                return
+            lines.append(
+                f"Dialogue: 9,{ass_time(a)},{ass_time(b)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters:d}"
+            )
 
         # Per-second TIME during WORK (smooth ticking, like REST).
         for lap in laps:
             if (lap.intensity or "").lower() == "rest":
                 continue
 
-            vt_start = (lap.start - t0).total_seconds() + offset_seconds
-            vt_end = (lap.end - t0).total_seconds() + offset_seconds
-            if vt_end <= 0:
+            if (rng := lap_video_range(lap)) is None:
                 continue
-            if video_duration is not None and vt_start >= video_duration:
-                continue
-
-            start_v = max(0.0, vt_start)
-            end_v = vt_end
-            if video_duration is not None:
-                end_v = min(end_v, video_duration)
-            if end_v <= start_v:
-                continue
+            start_v, end_v = rng
 
             t = start_v
             while t < end_v:
@@ -589,6 +597,110 @@ def generate_ass(
                 )
                 t = tn
 
+        # Per-meter DISTANCE during WORK (interpolated between FIT samples).
+        # This makes the METERS field increment smoothly even if FIT records are sparse.
+        ts_abs = [s.t for s in samples]
+        dist_abs = [s.distance_m for s in samples]
+
+        def interpolate_distance_at(t: datetime) -> Optional[float]:
+            idx = bisect_left(ts_abs, t)
+            if idx <= 0:
+                return dist_abs[0] if dist_abs else None
+            if idx >= len(ts_abs):
+                return dist_abs[-1] if dist_abs else None
+            t0_i, t1_i = ts_abs[idx - 1], ts_abs[idx]
+            d0_i, d1_i = dist_abs[idx - 1], dist_abs[idx]
+            if d0_i is None or d1_i is None:
+                return d1_i if d1_i is not None else d0_i
+            dt = (t1_i - t0_i).total_seconds()
+            if dt <= 0:
+                return d1_i
+            alpha = (t - t0_i).total_seconds() / dt
+            return float(d0_i + (d1_i - d0_i) * alpha)
+
+        for lap in laps:
+            if (lap.intensity or "").lower() == "rest":
+                continue
+            lap_start_dist = lap.start_distance_m
+            if lap_start_dist is None:
+                lap_start_dist = interpolate_distance_at(lap.start)
+            if lap_start_dist is None:
+                continue
+
+            if (rng := lap_video_range(lap)) is None:
+                continue
+            start_v, end_v = rng
+
+            # Find sample range for this lap.
+            i0 = bisect_left(ts_abs, lap.start)
+            i1 = bisect_left(ts_abs, lap.end)
+            if i0 >= len(ts_abs):
+                continue
+            i1 = max(i0 + 1, min(i1 + 1, len(ts_abs)))
+
+            # Seed with distance at lap start so we can draw 0 immediately.
+            d0 = interpolate_distance_at(lap.start)
+            if d0 is None:
+                continue
+            # The Distance field shows lap meters (relative to lap start).
+            # Layer 9 sits above per-sample values so interpolation always wins.
+
+            # Build a list of (vt, meters) change points.
+            changes: List[Tuple[float, int]] = [(start_v, 0)]
+            prev_t = lap.start
+            prev_d = d0
+            for i in range(i0, i1):
+                t_i = ts_abs[i]
+                d_i = dist_abs[i]
+                if t_i <= prev_t:
+                    continue
+                if d_i is None or prev_d is None:
+                    prev_t = t_i
+                    prev_d = d_i if d_i is not None else prev_d
+                    continue
+
+                rel0 = prev_d - lap_start_dist
+                rel1 = d_i - lap_start_dist
+                if rel1 < rel0:
+                    prev_t = t_i
+                    prev_d = d_i
+                    continue
+
+                m0 = max(0, int(math.floor(rel0)))
+                m1 = max(0, int(math.floor(rel1)))
+                if m1 > m0 and (d_i - prev_d) > 0:
+                    for m in range(m0 + 1, m1 + 1):
+                        target = lap_start_dist + float(m)
+                        alpha = (target - prev_d) / (d_i - prev_d)
+                        alpha = max(0.0, min(1.0, alpha))
+                        abs_t = prev_t + timedelta(seconds=(t_i - prev_t).total_seconds() * alpha)
+                        vt = (abs_t - t0).total_seconds() + offset_seconds
+                        if vt < start_v:
+                            continue
+                        if vt >= end_v:
+                            break
+                        changes.append((vt, m))
+
+                prev_t = t_i
+                prev_d = d_i
+
+            # Emit segments between change points, clamped to the lap.
+            changes.sort(key=lambda x: x[0])
+            # Deduplicate same-meter events at the same timestamp.
+            dedup: List[Tuple[float, int]] = []
+            for vt, m in changes:
+                if dedup and abs(dedup[-1][0] - vt) < 1e-6 and dedup[-1][1] == m:
+                    continue
+                if dedup and m == dedup[-1][1]:
+                    continue
+                dedup.append((vt, m))
+            changes = dedup
+
+            for (vt, m), (vt2, _) in zip(changes, changes[1:] + [(end_v, -1)]):
+                a = max(start_v, vt)
+                b = min(end_v, vt2)
+                emit_distance_dialogue(a, b, m)
+
         # Rest backdrop tint (changes the panel background color during rest intervals).
         rest_backdrop_color = "&H5A4636&"  # slightly brighter, blue-tinted (BGR)
         rest_border_color = "&HFFCC00&"  # bright blue/cyan (matches Split accent)
@@ -598,19 +710,9 @@ def generate_ass(
             if (lap.intensity or "").lower() != "rest":
                 continue
 
-            vt_start = (lap.start - t0).total_seconds() + offset_seconds
-            vt_end = (lap.end - t0).total_seconds() + offset_seconds
-            if vt_end <= 0:
+            if (rng := lap_video_range(lap)) is None:
                 continue
-            if video_duration is not None and vt_start >= video_duration:
-                continue
-
-            st_h = max(0.0, vt_start)
-            et_h = vt_end
-            if video_duration is not None:
-                et_h = min(et_h, video_duration)
-            if et_h <= st_h:
-                continue
+            st_h, et_h = rng
 
             rest_backdrop_draw = (
                 f"{{\\pos({origin_x},{origin_y})\\p1\\c{rest_backdrop_color}\\alpha&H{alpha_main:02X}&}}"
@@ -633,19 +735,9 @@ def generate_ass(
 
         # Lap header (ensures lap number/state is visible even if samples are sparse).
         for lap in laps:
-            vt_start = (lap.start - t0).total_seconds() + offset_seconds
-            vt_end = (lap.end - t0).total_seconds() + offset_seconds
-            if vt_end <= 0:
+            if (rng := lap_video_range(lap)) is None:
                 continue
-            if video_duration is not None and vt_start >= video_duration:
-                continue
-
-            st_h = max(0.0, vt_start)
-            et_h = vt_end
-            if video_duration is not None:
-                et_h = min(et_h, video_duration)
-            if et_h <= st_h:
-                continue
+            st_h, et_h = rng
 
             state = "REST" if (lap.intensity or "").lower() == "rest" else "WORK"
             header_left_text = (
@@ -658,19 +750,9 @@ def generate_ass(
             if (lap.intensity or "").lower() != "rest":
                 continue
 
-            vt_start = (lap.start - t0).total_seconds() + offset_seconds
-            vt_end = (lap.end - t0).total_seconds() + offset_seconds
-            if vt_end <= 0:
+            if (rng := lap_video_range(lap)) is None:
                 continue
-            if video_duration is not None and vt_start >= video_duration:
-                continue
-
-            start_v = max(0.0, vt_start)
-            end_v = vt_end
-            if video_duration is not None:
-                end_v = min(end_v, video_duration)
-            if end_v <= start_v:
-                continue
+            start_v, end_v = rng
 
             prev_active = None
             for l in reversed(laps):
@@ -724,6 +806,8 @@ def generate_ass(
             rest_total = lap.total_elapsed_s
             if rest_total is None:
                 rest_total = (lap.end - lap.start).total_seconds()
+            lap_vt_start = (lap.start - t0).total_seconds() + offset_seconds
+            lap_vt_start = max(0.0, lap_vt_start)
 
             t = start_v
             while t < end_v:
@@ -731,7 +815,7 @@ def generate_ass(
                 if tn <= t:
                     tn = min(end_v, t + 1.0)
 
-                lap_elapsed = max(0.0, t - vt_start)
+                lap_elapsed = max(0.0, t - lap_vt_start)
                 rest_remaining = max(0.0, rest_total - lap_elapsed)
                 header_right_text = (
                     f"{{\\an9\\pos({origin_x + box_w - px(12)},{header_y})\\c&HFFFFFF&{hdr_fx}}}REST {format_elapsed(rest_remaining)}"
@@ -798,7 +882,11 @@ def generate_ass(
             )
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{pace_str}")
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}")
-        lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}")
+        if current_lap is None or not laps:
+            # When FIT laps exist, the WORK METERS value is rendered per-meter above.
+            lines.append(
+                f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}"
+            )
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{watts_str}")
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{hr_str}")
 
