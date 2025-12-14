@@ -58,9 +58,16 @@ Adjust timing manually:
 uvx c2-overlay video.mp4 workout.fit --offset 2.5
 ```
 
+Override the video start timestamp (when metadata is missing/incorrect):
+
+```bash
+uvx c2-overlay video.mp4 workout.fit --video-start 2025-12-14T10:41:31Z
+```
+
 ### Options
 
 - `-o, --out-ass PATH`: Output .ass file path (default: same name as video)
+- `--video-start ISO8601`: Override video start timestamp (e.g. `2025-12-14T10:41:31Z`)
 - `--offset SECONDS`: Manual offset adjustment in seconds (positive = later, negative = earlier)
 - `--burn-in OUT_VIDEO`: Burn overlay into video using ffmpeg
 - `--label-font FONT`: Font for labels (default: PragmataPro)

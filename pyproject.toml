@@ -5,14 +5,14 @@ authors = [
 ]
 version = "0.1.0"
 description = "generate PM5-style overlays for rowing videos from Concept2 FIT files"
-readme = "README.md"
+readme = "readme.md"
 requires-python = ">=3.12"
 dependencies = [
     "fitparse>=1.2.0",
 ]
 
 [project.scripts]
-c2-overlay = "c2_overlay:main"
+c2-overlay = "c2_overlay.cli:main"
 c2-overlay-lint = "c2_overlay.ass_lint:main"
 
 [tool.uv]
