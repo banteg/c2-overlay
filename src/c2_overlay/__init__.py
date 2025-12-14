@@ -43,6 +43,12 @@ from fitparse import FitFile
 # Helpers: time parsing/format
 # -----------------------------
 
+ISO8601_RE = re.compile(
+    r"^(?P<main>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+    r"(?P<frac>\.\d+)?"
+    r"(?P<tz>Z|[+-]\d{2}:?\d{2})?$"
+)
+
 
 def parse_iso8601(s: str) -> datetime:
     """
@@ -57,6 +63,13 @@ def parse_iso8601(s: str) -> datetime:
     s = s.strip()
     if not s:
         raise ValueError("empty datetime string")
+
+    m = ISO8601_RE.match(s)
+    if m:
+        main, frac, tz = m.group("main"), m.group("frac"), m.group("tz")
+        if frac and len(frac) > 7:  # "." + 6 microsecond digits
+            frac = frac[:7]
+        s = main + (frac or "") + (tz or "")
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
 
@@ -365,6 +378,15 @@ def get_video_metadata(
 
     w = int(streams[0].get("width") or 0)
     h = int(streams[0].get("height") or 0)
+    tags = streams[0].get("tags") or {}
+    rotate = tags.get("rotate")
+    if rotate is not None:
+        try:
+            r = int(float(rotate)) % 360
+        except ValueError:
+            r = None
+        if r in {90, 270}:
+            w, h = h, w
 
     dur_text = (data.get("format") or {}).get("duration")
     duration = float(dur_text) if dur_text else None
@@ -501,6 +523,7 @@ def generate_ass(
 
     if left_margin is None:
         left_margin = max(10, int(round(20 * scale_x)))
+    use_top = top_margin is not None
     if top_margin is None:
         top_margin = 0
     if bottom_margin is None:
@@ -511,7 +534,7 @@ def generate_ass(
     box_h = max(1, int(round(190 * scale_y)))
 
     origin_x = int(left_margin)
-    if top_margin > 0:
+    if use_top:
         origin_y = int(top_margin)
     else:
         origin_y = int(video_h - bottom_margin - box_h)
@@ -1109,6 +1132,32 @@ def generate_ass(
 
                 t = tn
 
+    open_values: dict[tuple[int, str, int, int], tuple[float, float, str]] = {}
+    merge_eps = 1e-4
+
+    def flush_dialogue(
+        key: tuple[int, str, int, int], st: float, et: float, text: str
+    ) -> None:
+        layer, style, x, y = key
+        lines.append(
+            f"Dialogue: {layer},{ass_time(st)},{ass_time(et)},{style},,0,0,0,,{{\\pos({x},{y})}}{text}"
+        )
+
+    def emit_dialogue(
+        layer: int, st: float, et: float, style: str, x: int, y: int, text: str
+    ) -> None:
+        if et <= st:
+            return
+        key = (layer, style, x, y)
+        prev = open_values.get(key)
+        if prev is not None:
+            pst, pet, ptext = prev
+            if ptext == text and abs(pet - st) <= merge_eps:
+                open_values[key] = (pst, et, ptext)
+                return
+            flush_dialogue(key, pst, pet, ptext)
+        open_values[key] = (st, et, text)
+
     for s, st, et in zip(samples, start_times, end_times):
         if et <= 0:
             continue
@@ -1165,25 +1214,64 @@ def generate_ass(
 
         if current_lap is None or not laps or not interpolate:
             # When FIT laps exist, the WORK TIME value is rendered per-second above.
-            lines.append(
-                f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{lap_elapsed_str}"
+            emit_dialogue(
+                6,
+                st_clip,
+                et_clip,
+                "Time",
+                col1_x,
+                value_row1_y,
+                lap_elapsed_str,
             )
-        lines.append(
-            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{pace_str}"
+        emit_dialogue(
+            6,
+            st_clip,
+            et_clip,
+            "Split",
+            col2_x,
+            value_row1_y,
+            pace_str,
         )
-        lines.append(
-            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}"
+        emit_dialogue(
+            6,
+            st_clip,
+            et_clip,
+            "SPM",
+            col3_x,
+            value_row1_y,
+            spm_str,
         )
         if current_lap is None or not laps or current_lap.index not in upsampled_laps:
-            lines.append(
-                f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}"
+            emit_dialogue(
+                6,
+                st_clip,
+                et_clip,
+                "Distance",
+                col1_x,
+                value_row2_y,
+                meters_str,
             )
-        lines.append(
-            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{watts_str}"
+        emit_dialogue(
+            6,
+            st_clip,
+            et_clip,
+            "Watts",
+            col2_x,
+            value_row2_y,
+            watts_str,
         )
-        lines.append(
-            f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{hr_str}"
+        emit_dialogue(
+            6,
+            st_clip,
+            et_clip,
+            "HeartRate",
+            col3_x,
+            value_row2_y,
+            hr_str,
         )
+
+    for key, (st, et, text) in open_values.items():
+        flush_dialogue(key, st, et, text)
 
     Path(out_ass).write_text("\n".join(lines), encoding="utf-8")
 
