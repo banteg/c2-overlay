@@ -142,6 +142,21 @@ class Sample:
     speed: Optional[float] = None  # m/s
 
 
+@dataclass(frozen=True)
+class LapSegment:
+    index: int  # 1-based
+    start: datetime
+    end: datetime
+    intensity: str  # "active" | "rest" | other
+    start_distance_m: Optional[float]
+    total_elapsed_s: Optional[float]
+    total_distance_m: Optional[float]
+    avg_speed_m_s: Optional[float]
+    avg_power_w: Optional[int]
+    avg_cadence_spm: Optional[int]
+    avg_hr_bpm: Optional[int]
+
+
 def parse_tcx(tcx_path: str) -> List[Sample]:
     """
     Parse a Concept2/TrainingCenterDatabase TCX file.
@@ -354,6 +369,7 @@ class ParsedData:
     samples: List[Sample]
     timebase: str  # "absolute" | "relative"
     kind: str  # "tcx" | "fit" | "csv"
+    laps: Optional[List[LapSegment]] = None
 
 
 def parse_data_file(path: str) -> ParsedData:
@@ -361,7 +377,65 @@ def parse_data_file(path: str) -> ParsedData:
     if ext == ".tcx":
         return ParsedData(samples=parse_tcx(path), timebase="absolute", kind="tcx")
     if ext == ".fit":
-        return ParsedData(samples=parse_fit(path), timebase="absolute", kind="fit")
+        samples = parse_fit(path)
+        laps: List[LapSegment] = []
+        if FitFile is not None:
+            fit = FitFile(path)
+            # Build a timestamp list for fast lookup of lap start distances.
+            ts_list = [s.t for s in samples]
+            dist_list = [s.distance_m for s in samples]
+
+            def distance_at(t: datetime) -> Optional[float]:
+                lo, hi = 0, len(ts_list)
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if ts_list[mid] < t:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                idx = min(lo, len(ts_list) - 1)
+                # Prefer the first sample at/after start; fallback to previous if missing distance.
+                for j in (idx, idx - 1, idx + 1):
+                    if 0 <= j < len(dist_list) and dist_list[j] is not None:
+                        return float(dist_list[j])
+                return None
+
+            for msg in fit.get_messages("lap"):
+                fields = {f.name: f.value for f in msg}
+                start = fields.get("start_time")
+                end = fields.get("timestamp")
+                if not isinstance(start, datetime) or not isinstance(end, datetime):
+                    continue
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
+                if end.tzinfo is None:
+                    end = end.replace(tzinfo=timezone.utc)
+
+                total_elapsed = fields.get("total_elapsed_time")
+                total_distance = fields.get("total_distance")
+                avg_speed = fields.get("enhanced_avg_speed", fields.get("avg_speed"))
+                avg_power = fields.get("avg_power")
+                avg_cadence = fields.get("avg_cadence")
+                avg_hr = fields.get("avg_heart_rate")
+
+                laps.append(
+                    LapSegment(
+                        index=int(fields.get("message_index", len(laps))) + 1,
+                        start=start,
+                        end=end,
+                        intensity=str(fields.get("intensity") or "").lower() or "unknown",
+                        start_distance_m=distance_at(start),
+                        total_elapsed_s=float(total_elapsed) if isinstance(total_elapsed, (int, float)) else None,
+                        total_distance_m=float(total_distance) if isinstance(total_distance, (int, float)) else None,
+                        avg_speed_m_s=float(avg_speed) if isinstance(avg_speed, (int, float)) else None,
+                        avg_power_w=int(avg_power) if isinstance(avg_power, (int, float)) else None,
+                        avg_cadence_spm=int(avg_cadence) if isinstance(avg_cadence, (int, float)) else None,
+                        avg_hr_bpm=int(avg_hr) if isinstance(avg_hr, (int, float)) else None,
+                    )
+                )
+
+        laps.sort(key=lambda l: l.start)
+        return ParsedData(samples=samples, timebase="absolute", kind="fit", laps=laps or None)
     if ext == ".csv":
         return ParsedData(samples=parse_concept2_csv(path), timebase="relative", kind="csv")
     raise ValueError(f"Unsupported data file extension: {ext} (expected .tcx, .fit, or .csv)")
@@ -468,6 +542,7 @@ def generate_ass(
     top_margin: Optional[int],
     bottom_margin: Optional[int],
     box_alpha: int,
+    laps: Optional[List[LapSegment]] = None,
 ) -> None:
     """
     Create a PM5-inspired overlay matching `input/pm5_overlay_modern_grid.ass`:
@@ -651,6 +726,7 @@ def generate_ass(
     value_row1_y = origin_y + py(38)
     label_row2_y = origin_y + py(102)
     value_row2_y = origin_y + py(128)
+    header_y = max(0, origin_y - py(28))
 
     labels = [
         ("TIME", "&HFFFFFF&", col1_x, label_row1_y),
@@ -666,6 +742,118 @@ def generate_ass(
         )
 
     # Per-sample values (6 lines per sample so each value can have its own style/color).
+    if laps:
+        def video_time_to_abs(vt: float) -> datetime:
+            return t0 + timedelta(seconds=(vt - offset_seconds))
+
+        def lap_for_abs(t: datetime) -> Optional[LapSegment]:
+            for l in laps:
+                if l.start <= t < l.end:
+                    return l
+            return None
+
+        # Lap header (ensures lap number/state is visible even if samples are sparse).
+        for lap in laps:
+            vt_start = (lap.start - t0).total_seconds() + offset_seconds
+            vt_end = (lap.end - t0).total_seconds() + offset_seconds
+            if vt_end <= 0:
+                continue
+            if video_duration is not None and vt_start >= video_duration:
+                continue
+
+            st_h = max(0.0, vt_start)
+            et_h = vt_end
+            if video_duration is not None:
+                et_h = min(et_h, video_duration)
+            if et_h <= st_h:
+                continue
+
+            state = "REST" if (lap.intensity or "").lower() == "rest" else "WORK"
+            header_left_text = (
+                f"{{\\an7\\pos({origin_x + px(12)},{header_y})\\c&HFFFFFF&}}LAP {lap.index:02d} \u00b7 {state}"
+            )
+            lines.append(f"Dialogue: 10,{ass_time(st_h)},{ass_time(et_h)},Label,,0,0,0,,{header_left_text}")
+
+        # Per-second rest overlays (FIT often has sparse/no records during rest).
+        for lap in laps:
+            if (lap.intensity or "").lower() != "rest":
+                continue
+
+            vt_start = (lap.start - t0).total_seconds() + offset_seconds
+            vt_end = (lap.end - t0).total_seconds() + offset_seconds
+            if vt_end <= 0:
+                continue
+            if video_duration is not None and vt_start >= video_duration:
+                continue
+
+            start_v = max(0.0, vt_start)
+            end_v = vt_end
+            if video_duration is not None:
+                end_v = min(end_v, video_duration)
+            if end_v <= start_v:
+                continue
+
+            prev_active = None
+            for l in reversed(laps):
+                if l.start < lap.start and (l.intensity or "").lower() == "active":
+                    prev_active = l
+                    break
+
+            prev_pace = "--:--.-"
+            prev_spm = "--"
+            prev_watts = "---"
+            prev_hr = "---"
+            if prev_active is not None:
+                if prev_active.avg_speed_m_s and prev_active.avg_speed_m_s > 0:
+                    prev_pace = format_pace(500.0 / prev_active.avg_speed_m_s)
+                if prev_active.avg_cadence_spm is not None:
+                    prev_spm = f"{prev_active.avg_cadence_spm:d}"
+                if prev_active.avg_power_w is not None:
+                    prev_watts = f"{prev_active.avg_power_w:d}"
+                if prev_active.avg_hr_bpm is not None:
+                    prev_hr = f"{prev_active.avg_hr_bpm:d}"
+
+            lap_label = f"LAP {lap.index:02d} \u00b7 REST"
+
+            t = start_v
+            while t < end_v:
+                tn = min(end_v, math.floor(t + 1.0))
+                if tn <= t:
+                    tn = min(end_v, t + 1.0)
+
+                abs_t = video_time_to_abs(t)
+                lap_elapsed = max(0.0, (abs_t - lap.start).total_seconds())
+                lap_elapsed_str = format_elapsed(lap_elapsed)
+
+                rest_remaining = None
+                if lap.total_elapsed_s is not None:
+                    rest_remaining = max(0.0, lap.total_elapsed_s - lap_elapsed)
+
+                # Approximate lap distance during rest (can drift slightly).
+                lap_meters = 0
+                if lap.total_distance_m is not None and lap.total_elapsed_s and lap.total_elapsed_s > 0:
+                    frac = max(0.0, min(1.0, lap_elapsed / lap.total_elapsed_s))
+                    lap_meters = int(round(lap.total_distance_m * frac))
+
+                # Per-second header additions so countdown ticks.
+                header_left_text = f"{{\\an7\\pos({origin_x + px(12)},{header_y})\\c&HFFFFFF&}}{lap_label}"
+                lines.append(f"Dialogue: 21,{ass_time(t)},{ass_time(tn)},Label,,0,0,0,,{header_left_text}")
+                if rest_remaining is not None:
+                    header_right_text = (
+                        f"{{\\an9\\pos({origin_x + box_w - px(12)},{header_y})\\c&HFFFFFF&}}REST {format_elapsed(rest_remaining)}"
+                    )
+                    lines.append(f"Dialogue: 21,{ass_time(t)},{ass_time(tn)},Label,,0,0,0,,{header_right_text}")
+
+                # Use higher layers so rest overlays sit above any lingering work sample events.
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{lap_elapsed_str}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{prev_pace}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{prev_spm}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{lap_meters:d}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{prev_watts}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{prev_hr}")
+
+                t = tn
+
     for s, st, et in zip(samples, start_times, end_times):
         if et <= 0:
             continue
@@ -679,8 +867,36 @@ def generate_ass(
         if et_clip <= st_clip:
             continue
 
-        elapsed = (s.t - t0).total_seconds()
-        elapsed_str = format_elapsed(elapsed)
+        current_lap: Optional[LapSegment] = lap_for_abs(s.t) if laps else None
+
+        lap_intensity = (current_lap.intensity if current_lap else "active").lower()
+        is_rest = lap_intensity == "rest"
+        lap_index = current_lap.index if current_lap else 1
+
+        if is_rest and laps:
+            # Rest laps are rendered per-second above.
+            continue
+        if current_lap is not None:
+            # Prevent a sparse/long sample interval from bleeding into the next lap (e.g. into REST),
+            # which would cause WORK values to overlap with REST overlays.
+            lap_end_vt = (current_lap.end - t0).total_seconds() + offset_seconds
+            # Some renderers treat end timestamps as inclusive; end slightly before the lap boundary.
+            et_clip = min(et_clip, lap_end_vt - 0.01)
+            if et_clip <= st_clip:
+                continue
+
+        if current_lap:
+            lap_elapsed = (s.t - current_lap.start).total_seconds()
+            lap_elapsed_str = format_elapsed(lap_elapsed)
+            if current_lap.start_distance_m is not None and s.distance_m is not None:
+                lap_meters = max(0, int(round(s.distance_m - current_lap.start_distance_m)))
+                meters_str = f"{lap_meters:d}"
+            else:
+                meters_str = "---"
+        else:
+            elapsed = (s.t - t0).total_seconds()
+            lap_elapsed_str = format_elapsed(elapsed)
+            meters_str = f"{int(round(s.distance_m)):d}" if s.distance_m is not None else "---"
 
         pace_sec = 500.0 / s.speed if (s.speed is not None and s.speed > 0) else None
         pace_str = format_pace(pace_sec)
@@ -688,9 +904,8 @@ def generate_ass(
         spm_str = f"{s.cadence:d}" if s.cadence is not None else "--"
         watts_str = f"{s.watts:d}" if s.watts is not None else "---"
         hr_str = f"{s.hr:d}" if s.hr is not None else "---"
-        meters_str = f"{int(round(s.distance_m)):d}" if s.distance_m is not None else "---"
 
-        lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{elapsed_str}")
+        lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{lap_elapsed_str}")
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{pace_str}")
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}")
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}")
@@ -924,6 +1139,7 @@ def main() -> int:
         top_margin=args.top_margin,
         bottom_margin=args.bottom_margin,
         box_alpha=args.box_alpha,
+        laps=parsed.laps,
     )
     print(f"Wrote ASS overlay: {out_ass}")
 
