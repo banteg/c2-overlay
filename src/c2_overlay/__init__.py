@@ -217,10 +217,6 @@ def parse_fit_messages(fit: FitFile) -> list[Sample]:
     return samples
 
 
-def parse_fit(fit_path: str) -> list[Sample]:
-    return parse_fit_messages(FitFile(fit_path))
-
-
 @dataclass(frozen=True)
 class ParsedData:
     samples: list[Sample]
@@ -377,7 +373,7 @@ def get_video_metadata(
     source = "ffprobe:creation_time"
     creation_dt = None
     if tag:
-        if not re.search(r"(Z|[+-]\\d{2}:?\\d{2})$", tag.strip()):
+        if not re.search(r"(Z|[+-]\d{2}:?\d{2})$", tag.strip()):
             print(
                 f"WARNING: ffprobe creation_time has no timezone; assuming UTC: {tag}",
                 file=sys.stderr,
@@ -1214,6 +1210,8 @@ def burn_in(
     without Windows drive-letter escaping pain.
     """
     ass_abs = os.path.abspath(ass_path)
+    video_in_abs = os.path.abspath(video_in)
+    video_out_abs = os.path.abspath(video_out)
     ass_dir = os.path.dirname(ass_abs) or "."
     ass_name = os.path.basename(ass_abs)
 
@@ -1227,7 +1225,7 @@ def burn_in(
         ffmpeg_bin,
         "-y",
         "-i",
-        video_in,
+        video_in_abs,
         "-vf",
         vf,
         "-map",
@@ -1246,10 +1244,10 @@ def burn_in(
     else:
         cmd += ["-c:a", "aac", "-b:a", "192k"]
 
-    if Path(video_out).suffix.lower() in {".mp4", ".m4v"}:
+    if Path(video_out_abs).suffix.lower() in {".mp4", ".m4v"}:
         cmd += ["-movflags", "+faststart"]
 
-    cmd += [video_out]
+    cmd += [video_out_abs]
 
     proc = subprocess.Popen(
         cmd,
@@ -1424,7 +1422,6 @@ def main() -> int:
     )
     ap.add_argument(
         "--anchor",
-        "--tcx-anchor",
         dest="anchor",
         choices=["start", "first-visible", "first-row-visible"],
         default="start",
