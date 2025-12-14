@@ -1,5 +1,9 @@
 # c2-overlay
 
+<p align="center">
+  <img src="docs/hero.png" width="720" />
+</p>
+
 Generate PM5-style overlays for rowing videos from Concept2 FIT files.
 
 Creates accurate ASS subtitle overlays matching the Concept2 PM5 monitor display, synchronized with your workout video using metadata timestamps.
