@@ -702,7 +702,6 @@ def generate_ass(
 
                 abs_t = video_time_to_abs(t)
                 lap_elapsed = max(0.0, (abs_t - lap.start).total_seconds())
-                lap_elapsed_str = format_elapsed(lap_elapsed)
 
                 rest_remaining = None
                 if lap.total_elapsed_s is not None:
@@ -723,13 +722,32 @@ def generate_ass(
                     )
                     lines.append(f"Dialogue: 21,{ass_time(t)},{ass_time(tn)},Label,,0,0,0,,{header_right_text}")
 
+                # During REST, show the previous WORK interval summary (like the PM5 intervals table).
+                if prev_active is not None:
+                    prev_elapsed_s = prev_active.total_elapsed_s
+                    if prev_elapsed_s is None:
+                        prev_elapsed_s = (prev_active.end - prev_active.start).total_seconds()
+                    time_str = format_elapsed(prev_elapsed_s)
+                    meters_str = f"{int(round(prev_active.total_distance_m)):d}" if prev_active.total_distance_m is not None else "---"
+                    split_str = prev_pace
+                    spm_str = prev_spm
+                    watts_str = prev_watts
+                    hr_str = prev_hr
+                else:
+                    time_str = format_elapsed(lap_elapsed)
+                    meters_str = f"{lap_meters:d}"
+                    split_str = "--:--.-"
+                    spm_str = "--"
+                    watts_str = "---"
+                    hr_str = "---"
+
                 # Use higher layers so rest overlays sit above any lingering work sample events.
-                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{lap_elapsed_str}")
-                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{prev_pace}")
-                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{prev_spm}")
-                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{lap_meters:d}")
-                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{prev_watts}")
-                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{prev_hr}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{time_str}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{split_str}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},Watts,,0,0,0,,{{\\pos({col2_x},{value_row2_y})}}{watts_str}")
+                lines.append(f"Dialogue: 20,{ass_time(t)},{ass_time(tn)},HeartRate,,0,0,0,,{{\\pos({col3_x},{value_row2_y})}}{hr_str}")
 
                 t = tn
 
