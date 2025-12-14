@@ -589,6 +589,41 @@ def generate_ass(
                     return l
             return None
 
+        # Per-second TIME during WORK (smooth ticking, like REST).
+        for lap in laps:
+            if (lap.intensity or "").lower() == "rest":
+                continue
+
+            vt_start = (lap.start - t0).total_seconds() + offset_seconds
+            vt_end = (lap.end - t0).total_seconds() + offset_seconds
+            if vt_end <= 0:
+                continue
+            if video_duration is not None and vt_start >= video_duration:
+                continue
+
+            start_v = max(0.0, vt_start)
+            end_v = vt_end
+            if video_duration is not None:
+                end_v = min(end_v, video_duration)
+            if end_v <= start_v:
+                continue
+
+            t = start_v
+            while t < end_v:
+                tn = min(end_v, math.floor(t + 1.0))
+                if tn <= t:
+                    tn = min(end_v, t + 1.0)
+
+                abs_t = video_time_to_abs(t)
+                lap_elapsed = max(0.0, (abs_t - lap.start).total_seconds())
+                lap_elapsed_str = format_elapsed(lap_elapsed)
+
+                # Layer above per-sample values so this always "wins".
+                lines.append(
+                    f"Dialogue: 8,{ass_time(t)},{ass_time(tn)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{lap_elapsed_str}"
+                )
+                t = tn
+
         # Rest backdrop tint (changes the panel background color during rest intervals).
         rest_backdrop_color = "&H5A4636&"  # slightly brighter, blue-tinted (BGR)
         rest_border_color = "&HFFCC00&"  # bright blue/cyan (matches Split accent)
@@ -802,7 +837,11 @@ def generate_ass(
         watts_str = f"{s.watts:d}" if s.watts is not None else "---"
         hr_str = f"{s.hr:d}" if s.hr is not None else "---"
 
-        lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{lap_elapsed_str}")
+        if current_lap is None or not laps:
+            # When FIT laps exist, the WORK TIME value is rendered per-second above.
+            lines.append(
+                f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Time,,0,0,0,,{{\\pos({col1_x},{value_row1_y})}}{lap_elapsed_str}"
+            )
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Split,,0,0,0,,{{\\pos({col2_x},{value_row1_y})}}{pace_str}")
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},SPM,,0,0,0,,{{\\pos({col3_x},{value_row1_y})}}{spm_str}")
         lines.append(f"Dialogue: 6,{ass_time(st_clip)},{ass_time(et_clip)},Distance,,0,0,0,,{{\\pos({col1_x},{value_row2_y})}}{meters_str}")
