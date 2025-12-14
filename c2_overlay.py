@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-rowerg_overlay.py
+c2_overlay.py
 
-Generate a Concept2 RowErg-style overlay (.ass subtitles) from a TCX file and a video.
+Generate a Concept2 PM5-style overlay (.ass subtitles) from a Concept2 FIT file and a video.
 
 What it does
 - Reads the video's absolute start timestamp from metadata (ffprobe creation_time tag).
-- Reads absolute timestamps from the TCX trackpoints.
-- Computes the offset so TCX samples line up on the video timeline.
-- Writes a PM5-inspired overlay in the top-left, with heart rate in the top-right.
+- Reads absolute timestamps and laps from the FIT file.
+- Computes the offset so FIT samples line up on the video timeline.
+- Writes a modern PM5-style grid overlay bottom-left with lap/rest context.
 - Optionally burns the overlay into a new video using ffmpeg.
 
 Requirements
-- Python 3.9+
+- Python 3.12+
 - ffprobe + ffmpeg available on PATH (or pass --ffprobe-bin / --ffmpeg-bin)
 
 Example
-  python rowerg_overlay.py input.mp4 workout.tcx -o overlay.ass --burn-in output.mp4
+  python c2_overlay.py input.mp4 workout.fit -o input.ass --burn-in output.mp4
 """
 
 from __future__ import annotations
@@ -46,44 +46,26 @@ except Exception:  # pragma: no cover
 
 def parse_iso8601(s: str) -> datetime:
     """
-    Parse an ISO-8601-ish timestamp into an aware datetime in UTC.
+    Parse an ffprobe-style timestamp into an aware datetime in UTC.
 
-    Handles:
-      - ...Z
-      - ...+00:00
-      - ...+0000
-      - with or without fractional seconds
-      - naive datetimes (assumed UTC)
+    Expected inputs (examples from QuickTime/MOV metadata):
+      - 2025-12-14T10:41:31.000000Z
+      - 2025-12-14T10:41:31Z
+      - 2025-12-14T14:41:31+0400
+      - 2025-12-14T14:41:31+04:00
     """
     s = s.strip()
     if not s:
         raise ValueError("empty datetime string")
-    s = s.replace(" ", "T")
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
 
-    # Convert timezone offset like +0000 to +00:00
+    # Convert timezone offset like +0000 to +00:00 (Python expects a colon).
     m = re.match(r"^(.*)([+-]\d{2})(\d{2})$", s)
-    if m and ":" not in (m.group(2) + m.group(3)):
+    if m:
         s = f"{m.group(1)}{m.group(2)}:{m.group(3)}"
 
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        # Last-ditch parse attempts
-        for fmt in (
-            "%Y-%m-%dT%H:%M:%S.%f%z",
-            "%Y-%m-%dT%H:%M:%S%z",
-            "%Y-%m-%dT%H:%M:%S.%f",
-            "%Y-%m-%dT%H:%M:%S",
-        ):
-            try:
-                dt = datetime.strptime(s, fmt)
-                break
-            except ValueError:
-                dt = None
-        if dt is None:
-            raise
+    dt = datetime.fromisoformat(s)
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -126,16 +108,12 @@ def ass_time(sec: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cc:02d}"
 
 
-# -----------------------------
-# TCX parsing
-# -----------------------------
-
 @dataclass
 class Sample:
     t: datetime
     distance_m: Optional[float] = None
     hr: Optional[int] = None
-    cadence: Optional[int] = None  # usually stroke rate (SPM) in Concept2 TCX
+    cadence: Optional[int] = None  # usually stroke rate (SPM) in Concept2 FIT
     watts: Optional[int] = None
     speed: Optional[float] = None  # m/s
 
@@ -385,10 +363,10 @@ def generate_ass(
         METERS / WATTS / BPM
 
     offset_seconds is the computed (or overridden) shift that maps:
-      video_time = (sample_time - tcx_first_time) + offset_seconds
+      video_time = (sample_time - data_start_time) + offset_seconds
     """
     if not samples:
-        raise ValueError("No TCX trackpoints found.")
+        raise ValueError("No samples found.")
 
     if video_w <= 0 or video_h <= 0:
         # If ffprobe couldn't determine, choose a reasonable default
@@ -904,9 +882,9 @@ def burn_in(
 # Alignment helpers
 # -----------------------------
 
-def choose_tcx_anchor_index(samples: List[Sample], *, video_start: datetime, mode: str) -> int:
+def choose_anchor_index(samples: List[Sample], *, video_start: datetime, mode: str) -> int:
     """
-    Pick which TCX sample becomes t0.
+    Pick which sample becomes t0.
 
     Modes:
       - "start": use first sample
@@ -939,7 +917,7 @@ def choose_tcx_anchor_index(samples: List[Sample], *, video_start: datetime, mod
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        prog="rowerg_overlay.py",
+        prog="c2_overlay.py",
         description="Create a PM5-style overlay (.ass subtitles) from a Concept2 FIT file and align it to a video using metadata timestamps.",
     )
     ap.add_argument("video", help="Input video file (mp4/mov/etc)")
@@ -974,10 +952,12 @@ def main() -> int:
     ap.add_argument("--ffprobe-bin", default="ffprobe", help="Path to ffprobe (default: ffprobe)")
     ap.add_argument("--ffmpeg-bin", default="ffmpeg", help="Path to ffmpeg (default: ffmpeg)")
     ap.add_argument(
+        "--anchor",
         "--tcx-anchor",
+        dest="anchor",
         choices=["start", "first-visible", "first-row-visible"],
         default="start",
-        help="Which data sample to treat as time 0 for overlay generation (default: start).",
+        help="Which sample to treat as time 0 for overlay generation (default: start).",
     )
 
     args = ap.parse_args()
@@ -1011,12 +991,12 @@ def main() -> int:
     w, h, duration, video_creation, source = get_video_metadata(video_path, ffprobe_bin=args.ffprobe_bin)
 
     # Choose anchor (t0) used for both alignment and displayed elapsed time.
-    anchor_idx = choose_tcx_anchor_index(samples_all, video_start=video_creation, mode=args.tcx_anchor)
+    anchor_idx = choose_anchor_index(samples_all, video_start=video_creation, mode=args.anchor)
     samples = samples_all[anchor_idx:] if anchor_idx else samples_all
-    tcx_anchor = samples[0].t
+    anchor_time = samples[0].t
 
     # Auto offset: when does anchor occur on the video timeline?
-    auto_offset = (tcx_anchor - video_creation).total_seconds()
+    auto_offset = (anchor_time - video_creation).total_seconds()
     offset = auto_offset + float(args.offset)
 
     print("== Alignment ==")
@@ -1034,8 +1014,8 @@ def main() -> int:
     if first_row_visible is not None:
         tv = (first_row_visible.t - video_creation).total_seconds()
         print(f"First sample with cadence>0 during video: t={tv:.1f} s  [{first_row_visible.t.isoformat()}]")
-    if tcx_anchor != data_start:
-        print(f"Data anchor ({args.tcx_anchor}) time (UTC): {tcx_anchor.isoformat()}  [idx {anchor_idx}]")
+    if anchor_time != data_start:
+        print(f"Data anchor ({args.anchor}) time (UTC): {anchor_time.isoformat()}  [idx {anchor_idx}]")
     print(f"Auto offset (anchor - video_start): {auto_offset:+.3f} s")
     if args.offset:
         print(f"Manual adjustment: {args.offset:+.3f} s")
