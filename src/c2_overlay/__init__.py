@@ -621,11 +621,6 @@ def generate_ass(
         for lap in laps:
             if (lap.intensity or "").lower() == "rest":
                 continue
-            lap_start_dist = lap.start_distance_m
-            if lap_start_dist is None:
-                lap_start_dist = interpolate_distance_at(lap.start)
-            if lap_start_dist is None:
-                continue
 
             if (rng := lap_video_range(lap)) is None:
                 continue
@@ -638,67 +633,109 @@ def generate_ass(
                 continue
             i1 = max(i0 + 1, min(i1 + 1, len(ts_abs)))
 
-            # Seed with distance at lap start so we can draw 0 immediately.
-            d0 = interpolate_distance_at(lap.start)
-            if d0 is None:
+            # Prefer the lap message's start distance to avoid pre-lap interpolation artifacts.
+            lap_start_dist = lap.start_distance_m
+            if lap_start_dist is None:
+                lap_start_dist = interpolate_distance_at(lap.start)
+            if lap_start_dist is None:
+                lap_start_dist = dist_abs[i0]
+            if lap_start_dist is None:
                 continue
+            lap_start_dist = float(lap_start_dist)
+
+            lap_total_m = None
+            if lap.total_distance_m is not None and lap.total_distance_m > 0:
+                lap_total_m = int(round(lap.total_distance_m))
+            else:
+                lap_end_dist = interpolate_distance_at(lap.end)
+                if lap_end_dist is not None:
+                    lap_total_m = int(round(max(0.0, float(lap_end_dist) - lap_start_dist)))
+            if lap_total_m is None or lap_total_m <= 0:
+                continue
+
             # The Distance field shows lap meters (relative to lap start).
             # Layer 9 sits above per-sample values so interpolation always wins.
+            end_clip = max(start_v, end_v - 0.01)  # avoid inclusive-end overlap with REST
+            final_hold_s = 0.05
+            final_change_v = max(start_v, end_clip - final_hold_s)
+            # Bias meter ticks towards the end of each record interval.
+            # FIT distance samples often represent "distance after the stroke", so linear interpolation
+            # can make meters tick too early within a stroke.
+            interval_bias_start = 0.4  # 0.0 = linear, 1.0 = all-at-end
 
             # Build a list of (vt, meters) change points.
             changes: List[Tuple[float, int]] = [(start_v, 0)]
             prev_t = lap.start
-            prev_d = d0
+            prev_d = lap_start_dist
+            eps = 1e-6
+
+            # Iterate through distance samples in-lap, plus a synthetic endpoint at lap end.
+            points: List[Tuple[datetime, float]] = []
             for i in range(i0, i1):
-                t_i = ts_abs[i]
                 d_i = dist_abs[i]
+                if d_i is None:
+                    continue
+                points.append((ts_abs[i], float(d_i)))
+            points.append((lap.end, lap_start_dist + float(lap_total_m)))
+            points.sort(key=lambda x: x[0])
+            if not points:
+                continue
+
+            for t_i, d_i in points:
                 if t_i <= prev_t:
                     continue
-                if d_i is None or prev_d is None:
-                    prev_t = t_i
-                    prev_d = d_i if d_i is not None else prev_d
-                    continue
-
-                rel0 = prev_d - lap_start_dist
-                rel1 = d_i - lap_start_dist
-                if rel1 < rel0:
+                if d_i <= prev_d:
                     prev_t = t_i
                     prev_d = d_i
                     continue
 
-                m0 = max(0, int(math.floor(rel0)))
-                m1 = max(0, int(math.floor(rel1)))
-                if m1 > m0 and (d_i - prev_d) > 0:
+                rel0 = max(0.0, prev_d - lap_start_dist)
+                rel1 = max(0.0, d_i - lap_start_dist)
+                m0 = int(math.floor(rel0 + eps))
+                m1 = int(math.floor(rel1 + eps))
+                m1 = min(m1, max(0, lap_total_m - 1))
+                if m1 > m0:
                     for m in range(m0 + 1, m1 + 1):
                         target = lap_start_dist + float(m)
                         alpha = (target - prev_d) / (d_i - prev_d)
                         alpha = max(0.0, min(1.0, alpha))
-                        abs_t = prev_t + timedelta(seconds=(t_i - prev_t).total_seconds() * alpha)
+                        alpha_b = interval_bias_start + (1.0 - interval_bias_start) * alpha
+                        abs_t = prev_t + timedelta(seconds=(t_i - prev_t).total_seconds() * alpha_b)
                         vt = (abs_t - t0).total_seconds() + offset_seconds
-                        if vt < start_v:
-                            continue
-                        if vt >= end_v:
+                        if vt >= final_change_v:
                             break
                         changes.append((vt, m))
 
                 prev_t = t_i
                 prev_d = d_i
 
+            # Delay showing the final lap distance until the lap end to avoid finishing early.
+            changes.append((final_change_v, lap_total_m))
+
             # Emit segments between change points, clamped to the lap.
             changes.sort(key=lambda x: x[0])
-            # Deduplicate same-meter events at the same timestamp.
+            # Enforce monotonic timestamps and drop degenerate/duplicate changes.
             dedup: List[Tuple[float, int]] = []
+            last_vt = None
+            last_m = None
+            min_dt = 0.011  # 1 centisecond + epsilon (ASS timestamp resolution)
             for vt, m in changes:
-                if dedup and abs(dedup[-1][0] - vt) < 1e-6 and dedup[-1][1] == m:
+                if vt >= end_clip:
                     continue
-                if dedup and m == dedup[-1][1]:
+                if last_vt is not None and vt <= last_vt + min_dt:
+                    vt = last_vt + min_dt
+                if vt >= end_clip:
+                    continue
+                if last_m is not None and m <= last_m:
                     continue
                 dedup.append((vt, m))
+                last_vt = vt
+                last_m = m
             changes = dedup
 
-            for (vt, m), (vt2, _) in zip(changes, changes[1:] + [(end_v, -1)]):
+            for (vt, m), (vt2, _) in zip(changes, changes[1:] + [(end_clip, -1)]):
                 a = max(start_v, vt)
-                b = min(end_v, vt2)
+                b = min(end_clip, vt2)
                 emit_distance_dialogue(a, b, m)
 
         # Rest backdrop tint (changes the panel background color during rest intervals).
