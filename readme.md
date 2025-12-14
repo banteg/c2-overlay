@@ -1,8 +1,6 @@
 # c2-overlay
 
-<p align="center">
-  <img src="docs/hero.png" width="720" />
-</p>
+<img src="docs/hero.png" width="720" />
 
 Generate PM5-style overlays for rowing videos from Concept2 FIT files.
 
