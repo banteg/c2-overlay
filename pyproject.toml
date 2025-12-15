@@ -22,3 +22,8 @@ package = true
 dev = [
     "pytest>=9.0.2",
 ]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore:datetime\\.datetime\\.utcfromtimestamp\\(\\) is deprecated.*:DeprecationWarning:fitparse\\.processors",
+]
