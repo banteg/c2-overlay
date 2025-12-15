@@ -104,6 +104,12 @@ uvx c2-overlay video.mp4 workout.fit --workout-start 48
 4. Generates ASS subtitle file with PM5-style overlay
 5. Optionally burns subtitles into video with ffmpeg
 
+## Timestamp Accuracy
+
+Concept2 time metadata is a good starting point, but it’s not guaranteed to be start-aligned or second-precise across export routes. If your overlay is off by up to ~1 minute, use `--offset` / `--workout-start` / `--video-start` to correct it.
+
+More details: `docs/timestamps.md`.
+
 ## Display Layout
 
 The overlay shows a bottom-left panel with two rows:
