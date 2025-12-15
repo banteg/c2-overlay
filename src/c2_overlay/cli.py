@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .align import choose_anchor_index
 from .ffmpeg import burn_in
-from .fit import Sample, parse_data_file
+from .fit import parse_data_file
 from .overlay import generate_ass
 from .timeutil import parse_iso8601
 from .video import get_video_metadata

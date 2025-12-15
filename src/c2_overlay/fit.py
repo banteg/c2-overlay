@@ -91,15 +91,15 @@ def parse_fit_messages(fit: FitFile) -> list[Sample]:
 
     # Fill in missing speeds from distance/time deltas (m/s)
     for i in range(1, len(samples)):
-        if (
-            samples[i].speed is None
-            and samples[i].distance_m is not None
-            and samples[i - 1].distance_m is not None
-        ):
-            dt = (samples[i].t - samples[i - 1].t).total_seconds()
-            dd = samples[i].distance_m - samples[i - 1].distance_m
+        cur = samples[i]
+        prev = samples[i - 1]
+        d_cur = cur.distance_m
+        d_prev = prev.distance_m
+        if cur.speed is None and d_cur is not None and d_prev is not None:
+            dt = (cur.t - prev.t).total_seconds()
+            dd = d_cur - d_prev
             if dt > 0 and dd >= 0:
-                samples[i].speed = dd / dt
+                cur.speed = dd / dt
     if samples and samples[0].speed is None and len(samples) > 1:
         samples[0].speed = samples[1].speed
 
@@ -126,8 +126,10 @@ def parse_data_file(path: str) -> ParsedData:
             idx = min(bisect_left(ts_list, t), len(ts_list) - 1)
             # Prefer the first sample at/after start; fallback to previous if missing distance.
             for j in (idx, idx - 1, idx + 1):
-                if 0 <= j < len(dist_list) and dist_list[j] is not None:
-                    return float(dist_list[j])
+                if 0 <= j < len(dist_list):
+                    d = dist_list[j]
+                    if d is not None:
+                        return float(d)
             return None
 
         for msg in fit.get_messages("lap"):
@@ -174,7 +176,7 @@ def parse_data_file(path: str) -> ParsedData:
                 )
             )
 
-        laps.sort(key=lambda l: l.start)
+        laps.sort(key=lambda lap: lap.start)
         return ParsedData(samples=samples, laps=laps or None)
 
     raise ValueError(f"Unsupported data file extension: {ext} (expected .fit)")

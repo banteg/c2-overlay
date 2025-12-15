@@ -100,7 +100,7 @@ def generate_ass(
         raise ValueError("No samples found.")
 
     if laps:
-        laps = sorted(laps, key=lambda l: (l.start, l.index))
+        laps = sorted(laps, key=lambda lap: (lap.start, lap.index))
 
     if video_w <= 0 or video_h <= 0:
         # If ffprobe couldn't determine, choose a reasonable default
@@ -326,7 +326,7 @@ def generate_ass(
         def video_time_to_abs(vt: float) -> datetime:
             return t0 + timedelta(seconds=(vt - offset_seconds))
 
-        lap_starts = [l.start for l in laps]
+        lap_starts = [lap.start for lap in laps]
 
         prev_active_map: dict[int, LapSegment | None] = {}
         last_active: LapSegment | None = None

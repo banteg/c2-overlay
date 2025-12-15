@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Compatibility re-exports.
 
@@ -10,6 +8,8 @@ The project is organized into focused modules:
 - `overlay`: ASS overlay generation
 - `ffmpeg`: optional burn-in helpers
 """
+
+from __future__ import annotations
 
 from .ffmpeg import burn_in
 from .fit import LapSegment, ParsedData, Sample, normalize_intensity, parse_data_file
