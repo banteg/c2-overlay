@@ -34,10 +34,19 @@ def main() -> int:
         help="Override the video's start timestamp (ISO-8601, e.g. 2025-12-14T10:41:31Z).",
     )
     ap.add_argument(
+        "--workout-start",
+        type=float,
+        default=None,
+        help=(
+            "Override auto alignment: place the selected anchor sample at this video time "
+            "(seconds from video start)."
+        ),
+    )
+    ap.add_argument(
         "--offset",
         type=float,
         default=0.0,
-        help="Manual offset adjustment in seconds (added to the auto-computed alignment). "
+        help="Manual offset adjustment in seconds (added to the base alignment). "
         "Positive makes data appear later; negative earlier.",
     )
     ap.add_argument(
@@ -185,7 +194,8 @@ def main() -> int:
 
     # Auto offset: when does anchor occur on the video timeline?
     auto_offset = (anchor_time - video_creation).total_seconds()
-    offset = auto_offset + float(args.offset)
+    base_offset = float(args.workout_start) if args.workout_start is not None else auto_offset
+    offset = base_offset + float(args.offset)
 
     print("== Alignment ==")
     print(f"Video creation/start time (UTC): {video_creation.isoformat()}  [{source_used}]")
@@ -219,6 +229,8 @@ def main() -> int:
             f"Data anchor ({args.anchor}) time (UTC): {anchor_time.isoformat()}  [idx {anchor_idx}]"
         )
     print(f"Auto offset (anchor - video_start): {auto_offset:+.3f} s")
+    if args.workout_start is not None:
+        print(f"Workout start override (anchor at): {base_offset:+.3f} s")
     if args.offset:
         print(f"Manual adjustment: {args.offset:+.3f} s")
     print(f"Final offset used: {offset:+.3f} s")

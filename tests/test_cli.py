@@ -68,6 +68,42 @@ def test_cli_computes_offset_and_default_out_path(monkeypatch: pytest.MonkeyPatc
     assert captured["interpolate"] is True
 
 
+def test_cli_workout_start_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _p: "/usr/bin/ffprobe")
+
+    video_start = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
+    anchor_time = video_start + timedelta(seconds=2)
+    monkeypatch.setattr(
+        cli,
+        "parse_data_file",
+        lambda _p: ParsedData(samples=[Sample(t=anchor_time, cadence=20)]),
+    )
+    monkeypatch.setattr(
+        cli,
+        "get_video_metadata",
+        lambda *_a, **_kw: (1920, 1080, 10.0, video_start, "ffprobe:creation_time"),
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli, "generate_ass", lambda **kwargs: captured.update(kwargs))
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "c2-overlay",
+            "video.mp4",
+            "workout.fit",
+            "--workout-start",
+            "48",
+            "--offset",
+            "1.5",
+        ],
+    )
+    assert cli.main() == 0
+    assert captured["offset_seconds"] == pytest.approx(49.5)
+
+
 def test_cli_no_interp_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli.shutil, "which", lambda _p: "/usr/bin/ffprobe")
     t0 = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -140,4 +176,3 @@ def test_cli_burn_in_calls_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert cli.main() == 0
     assert burn_calls and burn_calls[0]["video_out"] == "out.mp4"
-
