@@ -65,3 +65,8 @@ def test_ass_time_hours() -> None:
 
 def test_ass_time_negative_clamps() -> None:
     assert ass_time(-5) == "0:00:00.00"
+
+
+def test_ass_time_rounding_boundary() -> None:
+    assert ass_time(0.004) == "0:00:00.00"
+    assert ass_time(0.005) == "0:00:00.01"

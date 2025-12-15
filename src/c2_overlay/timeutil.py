@@ -89,7 +89,9 @@ def ass_time(sec: float) -> str:
     """ASS timestamps: H:MM:SS.cc (centiseconds)."""
     if sec < 0:
         sec = 0.0
-    cs = int(round(sec * 100))
+    # Use round-half-up to avoid Python's banker's rounding at x.xx5, which can
+    # create surprising timestamp ties at ASS's 1-centisecond resolution.
+    cs = int(math.floor((sec * 100) + 0.5))
     h = cs // 360000
     m = (cs % 360000) // 6000
     s = (cs % 6000) // 100
